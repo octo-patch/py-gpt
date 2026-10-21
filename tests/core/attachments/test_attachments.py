@@ -23,6 +23,7 @@ def _make_item(id=None, name=None, path=None):
     obj.name = name
     obj.path = path
     obj.consumed = False
+    obj.extra = {}
 
     def serialize():
         return {
@@ -377,3 +378,13 @@ def test_save(mock_window_conf):
     attachments.provider.patch = MagicMock()
     attachments.save()
     attachments.provider.save.assert_called_once()
+
+def test_new_attachment_is_unshared_regardless_of_library_bulk_state():
+    for enabled in (False, True):
+        attachments = Attachments()
+        attachments.window = MagicMock()
+        attachments.window.core.ctx.get_current_meta.return_value = SimpleNamespace(
+            group=SimpleNamespace(extra={"attachment_share_all": enabled}))
+        attachments.window.core.config.get.return_value = False
+        result = attachments.new('chat', 'new.txt', '/tmp/new.txt', auto_save=False)
+        assert result.extra['project_active'] is False

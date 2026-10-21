@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.31 17:00:00                  #
+# Updated Date: 2026.09.20 13:00:00                  #
 # ================================================== #
 
 import os
@@ -17,8 +17,25 @@ from logging import ERROR, WARNING, INFO, DEBUG
 
 from PySide6 import QtCore
 from PySide6.QtCore import QCoreApplication, Qt
-from PySide6.QtGui import QScreen
+from PySide6.QtGui import QPixmapCache
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWebEngineCore import QWebEngineUrlScheme
+
+
+def _register_qrc_webengine_scheme():
+    """Enable CORS access to bundled qrc resources in Qt WebEngine."""
+    qrc_scheme = QWebEngineUrlScheme(b"qrc")
+    qrc_scheme.setFlags(
+        QWebEngineUrlScheme.Flag.SecureScheme
+        | QWebEngineUrlScheme.Flag.LocalAccessAllowed
+        | QWebEngineUrlScheme.Flag.CorsEnabled
+        | QWebEngineUrlScheme.Flag.ViewSourceAllowed
+    )
+    QWebEngineUrlScheme.registerScheme(qrc_scheme)
+
+# URL schemes must be registered before QApplication.
+_register_qrc_webengine_scheme()
+
 
 from pygpt_net.core.events import AppEvent
 from pygpt_net.core.access.shortcuts import GlobalShortcutFilter
@@ -35,7 +52,6 @@ from pygpt_net.provider.loaders.base import BaseLoader
 from pygpt_net.provider.vector_stores.base import BaseStore
 from pygpt_net.provider.web.base import BaseProvider as BaseWeb
 
-from PySide6.QtGui import QPixmapCache
 QPixmapCache.setCacheLimit(1024)  # ~1 MB
 
 
@@ -46,7 +62,6 @@ class Launcher:
         self.loop = None
         self.window = None
         self.debug = False
-        self.force_legacy = False
         self.force_disable_gpu = False
         self.shortcut_filter = None
         self.workdir = None
@@ -92,12 +107,6 @@ class Launcher:
                 help="debug mode (0=disabled, 1=info, 2=debug)",
             )
             parser.add_argument(
-                "-l",
-                "--legacy",
-                required=False,
-                help="force enable legacy mode (0=disabled, 1=enable)",
-            )
-            parser.add_argument(
                 "-n",
                 "--disable-gpu",
                 required=False,
@@ -125,11 +134,6 @@ class Launcher:
             else:
                 Debug.init(ERROR)  # default log level
 
-            # force legacy mode
-            if "legacy" in args and args["legacy"] == "1":
-                print("** Force legacy mode enabled")
-                self.force_legacy = True
-
             # force disable GPU
             if "disable_gpu" in args and args["disable_gpu"] == "1":
                 print("** Force disable GPU enabled")
@@ -152,6 +156,8 @@ class Launcher:
         self.app = QApplication(sys.argv)
         self.app.setAttribute(QtCore.Qt.AA_DontUseNativeMenuBar)
         self.window = MainWindow(self.app, args=args)
+        from pygpt_net.core.shutdown_signals import ShutdownSignals
+        self.shutdown_signals = ShutdownSignals(self.app)
         self.shortcut_filter = GlobalShortcutFilter(self.window)
 
         # Connect the window "ready" signal to close the splash
@@ -196,6 +202,12 @@ class Launcher:
             except Exception:
                 pass
             self._preloader = None
+        # Closing the separate splash process can reactivate the Windows console.
+        # Request GUI focus after it has closed, rather than only at first paint.
+        if sys.platform == "win32" and self.window is not None:
+            if self.window.isVisible() and not self.window.isMinimized():
+                self.window.raise_()
+                self.window.activateWindow()
 
     def add_plugin(self, plugin: BasePlugin):
         """
@@ -241,6 +253,10 @@ class Launcher:
         self.window.add_vector_store(store)
         if self.debug:
             print("Loaded vector store: {} ({})".format(store.id, store.__class__.__name__))
+
+    def add_file_preview(self, provider):
+        """Register a BaseFilePreview provider for all Files tabs."""
+        self.window.add_file_preview(provider)
 
     def add_loader(self, loader: BaseLoader):
         """
@@ -334,13 +350,34 @@ class Launcher:
 
     def run(self):
         """Run app"""
+        first_run = not bool(self.window.core.config.get("license.accepted"))
         self.window.setup()
-        geometry = self.window.screen().availableGeometry()
-        pos = QScreen.availableGeometry(QApplication.primaryScreen()).topLeft()
-        margin = 100
-        self.window.resize(geometry.width() - margin, geometry.height() - margin)
-        self.window.show()
-        self.window.move(pos)
+
+        screen = QApplication.primaryScreen() or self.window.screen()
+        geometry = screen.availableGeometry() if screen is not None else self.window.geometry()
+
+        if first_run:
+            # Establish a real normal (unmaximized) geometry first. Qt keeps it
+            # as normalGeometry(), so Restore/Unmaximize has sensible bounds
+            # even though the very first launch starts maximized.
+            width = max(640, int(geometry.width() * 0.80))
+            height = max(480, int(geometry.height() * 0.80))
+            width = min(width, geometry.width())
+            height = min(height, geometry.height())
+            x = geometry.x() + max(0, (geometry.width() - width) // 2)
+            y = geometry.y() + max(0, (geometry.height() - height) // 2)
+            self.window.setGeometry(x, y, width, height)
+            self.window.showMaximized()
+        else:
+            pos = geometry.topLeft()
+            margin = 100
+            self.window.resize(
+                geometry.width() - margin,
+                geometry.height() - margin,
+            )
+            self.window.show()
+            self.window.move(pos)
+
         self.window.post_setup()
         self.app.setWindowIcon(self.window.ui.get_app_icon())
         self.window.ui.tray.setup(self.app)

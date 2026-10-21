@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.31 16:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 from pygpt_net.core.events import RenderEvent
@@ -36,6 +36,9 @@ class Nodes:
 
         if type == 'font.toolbox':
             nodes[key].setStyleSheet(theme.style('font.toolbox'))
+            if key == 'prompt.mode':
+                size = self.window.core.config.get('font_size.toolbox') + 1
+                nodes[key].combo.setStyleSheet(f'font-size: {size}px;')
         elif type == 'font.chat.output':
             style_output = theme.style('font.chat.output')
             for pid in nodes[key]:
@@ -48,17 +51,19 @@ class Nodes:
         elif type == 'font.ctx.list':
             nodes[key].setStyleSheet(theme.style('font.ctx.list'))
 
-    def apply_all(self):
-        """Apply stylesheets to nodes"""
+    def apply_all(self, dispatch_theme: bool = True):
+        """Apply stylesheets to nodes.
+
+        :param dispatch_theme: emit renderer theme-change event for web output
+        """
         w = self.window
         ui = w.ui
         ctrl = w.controller
-        engine = ctrl.chat.render.get_engine()
-
         nodes = {
             'font.chat.input': [
                 'input',
                 'input_extra',
+                'prompt.model',
             ],
             'font.chat.output': [
                 'output',
@@ -73,7 +78,7 @@ class Nodes:
                 'assistants.import',
                 'assistants.label',
                 'cmd.enabled',
-                'dalle.options',
+                'image.options',
                 'img_variants.label',
                 'preset.clear',
                 'preset.presets',
@@ -81,15 +86,11 @@ class Nodes:
                 'preset.presets.new',
                 'preset.prompt',
                 'preset.prompt.label',
-                'preset.temperature.label',
                 'preset.use',
                 'prompt.label',
                 'prompt.mode',
                 'prompt.mode.label',
-                'prompt.model',
                 'prompt.model.label',
-                'temperature.label',
-                'toolbox.prompt.label',
                 'toolbox.preset.ai_name.label',
                 'toolbox.preset.user_name.label',
                 'vision.capture.auto',
@@ -101,29 +102,17 @@ class Nodes:
 
         # apply to nodes
         apply_ref = self.apply
-        skip_output = engine != 'legacy'
+        skip_output = True
         for t, keys in nodes.items():
             for k in keys:
                 if skip_output and k == "output":
                     continue
                 apply_ref(k, t)
 
-        # apply to notepads
         size = w.core.config.get('font_size')
         style_output = ctrl.theme.style('font.chat.output')
-        if ui.notepad:
-            for np in ui.notepad.values():
-                ta = np.textarea
-                ta.setStyleSheet(style_output)
-                ta.value = size
 
-        # apply to calendar
-        note = ui.calendar.get('note')
-        if note is not None:
-            note.setStyleSheet(style_output)
-            note.value = size
-
-        # plain text/markdown
+        # plain-text output
         output_plain = ui.nodes.get('output_plain', {})
         for obj in output_plain.values():
             try:
@@ -134,22 +123,19 @@ class Nodes:
 
         # ------------------------
 
-        # zoom, (Chromium, web engine)
+        # WebEngine zoom/theme update.
         output_nodes = ui.nodes.get('output', {})
-        if engine == 'web':
-            zoom = w.core.config.get('zoom')
-            for obj in output_nodes.values():
-                try:
-                    obj.value = zoom
-                    obj.update_zoom()
-                except Exception:
-                    pass
+        zoom = w.core.config.get('zoom')
+        for obj in output_nodes.values():
+            try:
+                obj.value = zoom
+                obj.update_zoom()
+            except Exception:
+                pass
+        input_container = ui.nodes.get('input.container')
+        if input_container is not None and hasattr(input_container, 'sync_width'):
+            input_container.sync_width()
+        if dispatch_theme:
             w.dispatch(RenderEvent(RenderEvent.ON_THEME_CHANGE))
-
-        # font size, legacy (markdown)
-        elif engine == 'legacy':
-            for obj in output_nodes.values():
-                obj.value = size
-                obj.update()
 
         w.tools.setup_theme()  # update tools

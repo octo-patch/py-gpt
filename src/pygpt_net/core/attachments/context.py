@@ -6,25 +6,29 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.02.06 01:00:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
 
+from __future__ import annotations
 import copy
 import os
 import shutil
 import uuid
 
 from shutil import copyfile
-from typing import Optional, List, Dict, Any, Tuple
+from typing import TYPE_CHECKING, Optional, List, Dict, Any, Tuple
 
-from llama_index.core import Document
 
 from pygpt_net.core.bridge import BridgeContext
 from pygpt_net.core.events import KernelEvent
 from pygpt_net.core.types import MODEL_DEFAULT_MINI
+from pygpt_net.core.text.mentions import to_model_text as mentions_to_model_text, iter_tags, attachment_reference, KIND_ATTACHMENT
 from pygpt_net.item.attachment import AttachmentItem
-from pygpt_net.item.ctx import CtxMeta, CtxItem
+from .project import ProjectContext
+from pygpt_net.item.ctx import CtxMeta, CtxItem, CtxGroup, group_additional_ctx_items
 
+if TYPE_CHECKING:
+    from llama_index.core import Document
 
 class Context:
     def __init__(self, window=None):
@@ -35,6 +39,8 @@ class Context:
         """
         self.window = window
         self.dir_index = "index"
+        self.project = ProjectContext(window)
+        self._project_owners = {}
         self.last_used_item = None
         self.last_used_content = None
         self.last_used_context = None
@@ -89,6 +95,250 @@ class Context:
         `{query}`
         """
 
+    @staticmethod
+    def is_active(item: Dict[str, Any]) -> bool:
+        """Return True when an additional-context item is enabled.
+
+        Older database rows do not contain the ``active`` field; they remain
+        enabled for backward compatibility.
+        """
+        if not isinstance(item, dict):
+            return True
+        return item.get("active", True) is not False
+
+
+    @staticmethod
+    def is_shared(item: Dict[str, Any]) -> bool:
+        """Project sharing is independent of activity in the owner conversation."""
+        return item.get("project_active", item.get("active", True)) is not False
+
+    def is_project_share_enabled(self, meta: Optional[CtxMeta] = None) -> bool:
+        """Read the persisted project sharing flag without scanning attachments."""
+        if meta is None or meta.group is None:
+            return False
+        group = self.window.core.ctx.get_group_by_id(meta.group.id)
+        if isinstance(group, CtxGroup):
+            meta.group = group
+        if (meta.group.extra or {}).get("attachment_share_cached") is not True:
+            # One-time initialization from existing sources. Subsequent reads
+            # use the group flag without scanning attachment rows.
+            self.get_project_items(meta)
+        return bool((meta.group.extra or {}).get("attachment_share", False))
+
+    def refresh_share_flags(self, meta, items=None):
+        """Recompute only after mutations; ordinary model calls read booleans."""
+        if meta is None or meta.group is None:
+            return
+        if items is None:
+            items = self.get_project_items(meta)
+        owners = {meta.id: meta}
+        for item in items:
+            owner = self.get_item_owner(meta, item)
+            owners[owner.id] = owner
+        any_shared = any(self.is_shared(item) for item in items)
+        pending = (meta.group.extra or {}).get("attachment_share_pending", {})
+        any_shared |= any(pending.values())
+        for owner in owners.values():
+            self.save_owner(owner)
+        meta.group.extra = dict(meta.group.extra or {})
+        states = [self.is_shared(item) for item in items] + list(pending.values())
+        if states and all(states):
+            meta.group.extra["attachment_share_all"] = True
+        elif states and not any(states):
+            meta.group.extra["attachment_share_all"] = False
+        meta.group.extra["attachment_share"] = any_shared
+        meta.group.extra["attachment_share_cached"] = True
+        self.window.core.ctx.update_group(meta.group)
+
+    def get_project_items(self, meta):
+        """Shared storage plus existing files owned by conversations in this project."""
+        if meta is None or meta.group is None:
+            return []
+        group = self.window.core.ctx.get_group_by_id(meta.group.id)
+        if isinstance(group, CtxGroup):
+            meta.group = group
+        peers = {}
+        # Sidebar filters must never change the project evidence library.
+        if isinstance(meta.group.id, int):
+            stored = self.window.core.ctx.provider.get_meta(
+                filters={"group_id": {"mode": "=", "value": meta.group.id}}, limit=0)
+            if isinstance(stored, dict):
+                peers.update({key: peer for key, peer in stored.items()
+                              if peer.group is not None and peer.group.id == meta.group.id})
+        loaded = self.window.core.ctx.get_meta()
+        if isinstance(loaded, dict):
+            peers.update({key: peer for key, peer in loaded.items()
+                          if peer.group is not None and peer.group.id == meta.group.id})
+        peers[meta.id] = meta
+        items = list(meta.group.additional_ctx or [])
+        for item in items:
+            owner = peers.get(item.get("owner_meta_id"), meta)
+            self._project_owners[(meta.group.id, item.get("uuid"))] = owner
+        for peer in peers.values():
+            peer.group = meta.group
+            for item in peer.additional_ctx or []:
+                self._project_owners[(meta.group.id, item.get("uuid"))] = peer
+                items.append(item)
+        seen = set()
+        result = []
+        for item in items:
+            key = item.get("uuid") or (item.get("type"), item.get("path"))
+            if key not in seen:
+                result.append(item)
+                seen.add(key)
+        if (meta.group.extra or {}).get("attachment_share_cached") is not True:
+            self.refresh_share_flags(meta, items=result)
+        return result
+
+    def get_item_owner(self, meta, item):
+        """Locate local storage independently of the open or filtered conversation."""
+        if item in (meta.additional_ctx or []):
+            return meta
+        if meta.group is not None:
+            key = (meta.group.id, item.get("uuid"))
+            if key not in self._project_owners:
+                self.get_project_items(meta)
+            return self._project_owners.get(key, meta)
+        return meta
+
+    def save_owner(self, owner):
+        loaded = self.window.core.ctx.get_meta()
+        if isinstance(loaded, dict) and owner.id not in loaded:
+            self.window.core.ctx.provider.save(owner.id, owner, [])
+        else:
+            self.window.core.ctx.save(owner.id)
+
+    def get_text_path(self, meta, item):
+        project = bool(meta.group and item in (meta.group.additional_ctx or []))
+        owner = meta if project else self.get_item_owner(meta, item)
+        root = self.get_dir(owner, project_scope=project)
+        uid = item["uuid"]
+        return os.path.join(root, uid, uid + ".txt")
+
+    def get_meta_items(self, meta: Optional[CtxMeta]) -> list:
+        """Return attachments visible for the given context under current sharing policy."""
+        if meta is None:
+            return []
+        items = list(meta.additional_ctx or [])
+        if self.is_project_share_enabled(meta):
+            items = [item for item in self.get_project_items(meta)
+                     if self.is_shared(item) or (meta.id is not None and
+                         (item.get("owner_meta_id") == meta.id if item in (meta.group.additional_ctx or [])
+                          else self.get_item_owner(meta, item).id == meta.id))] + items
+        elif meta.group is not None:
+            items.extend(item for item in meta.group.additional_ctx or []
+                         if meta.id is not None and item.get("owner_meta_id") == meta.id)
+        seen = set()
+        result = []
+        for item in items:
+            key = item.get("uuid") or (item.get("type"), item.get("path"))
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+        return result
+
+    def _use_project_scope(self, meta: Optional[CtxMeta]) -> bool:
+        """Return whether the currently visible attachment set comes from the project."""
+        return bool(
+            self.is_project_share_enabled(meta)
+            and meta.group is not None
+            and meta.group.additional_ctx
+        )
+
+    def _scope_items(self, meta: CtxMeta, project_scope: bool) -> list:
+        if project_scope and meta.group is not None:
+            if meta.group.additional_ctx is None:
+                meta.group.additional_ctx = []
+            return meta.group.additional_ctx
+        if meta.additional_ctx is None:
+            meta.additional_ctx = []
+        return meta.additional_ctx
+
+    def _item_project_scope(self, meta: CtxMeta, item: Dict[str, Any]) -> bool:
+        if meta.group is None:
+            return False
+        return item in (meta.group.additional_ctx or [])
+
+    def _remove_item_from_index(self, meta: CtxMeta, item: Dict[str, Any]) -> bool:
+        """Remove one attachment's indexed documents without deleting its stored content."""
+        doc_ids = item.get("doc_ids") if isinstance(item, dict) else None
+        if not doc_ids or not isinstance(doc_ids, list):
+            if item.get("indexed"):
+                item["indexed"] = False
+                item["doc_ids"] = []
+                return True
+            return False
+
+        index_path = os.path.join(os.path.dirname(os.path.dirname(self.get_text_path(meta, item))), self.dir_index)
+        changed = False
+        for doc_id in list(doc_ids):
+            try:
+                self.window.core.idx.indexing.remove_attachment(index_path, doc_id)
+                changed = True
+            except Exception as e:
+                self.window.core.debug.log(e)
+        if changed or item.get("indexed"):
+            item["indexed"] = False
+            item["doc_ids"] = []
+            return True
+        return False
+
+    def set_display_item_active(
+            self,
+            meta: CtxMeta,
+            item: Dict[str, Any],
+            active: bool,
+            persist: bool = True
+    ) -> bool:
+        """Enable/disable one visible attachment row and persist the state.
+
+        Archive rows represent multiple stored members; all members receive the
+        same state.  Disabling also removes already-indexed documents so RAG
+        cannot return content from an inactive attachment.
+        """
+        members = item.get("_ctx_items") if isinstance(item, dict) else None
+        if not members:
+            members = [item]
+
+        active = bool(active)
+        changed = False
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            if member.get("active", True) is not active or "active" not in member:
+                member["active"] = active
+                member["share_revision"] = int(member.get("share_revision", 0)) + 1
+                changed = True
+            if not active and self._remove_item_from_index(meta, member):
+                changed = True
+
+        if changed and persist:
+            self._save_item_states(meta, members)
+        return changed
+
+    def _save_item_states(self, meta, members):
+        if meta.group is not None and any(member in (meta.group.additional_ctx or []) for member in members):
+            self.window.core.ctx.update_group(meta.group)
+        if meta.group is not None:
+            self.refresh_share_flags(meta)
+        else:
+            self.save_owner(meta)
+
+    def set_project_items_active(self, meta, active, attachment_id=None):
+        """Apply a Library action in a batch, saving each owner once."""
+        if meta is None or meta.group is None:
+            return False
+        changed = []
+        for item in self.get_project_items(meta):
+            if attachment_id is None or item.get("uuid") == attachment_id:
+                if item.get("project_active", item.get("active", True)) is not bool(active):
+                    item["project_active"] = bool(active)
+                    item["share_revision"] = int(item.get("share_revision", 0)) + 1
+                    changed.append(item)
+        if changed:
+            self._save_item_states(meta, changed)
+        return bool(changed)
+
     def get_context(
             self,
             mode: str,
@@ -114,6 +364,40 @@ class Context:
             content = self.summary_context(ctx, history)
         return content
 
+    def get_turn_items(self, ctx):
+        """Add explicitly mentioned project sources without enabling sharing.
+
+        The Library includes private sources owned by other conversations. A
+        mention grants access for this request only, within the current project.
+        """
+        items = list(self.get_meta_items(ctx.meta))
+        references = [attachment_reference(tag.value) for tag in iter_tags(ctx.input or "")
+                      if tag.kind == KIND_ATTACHMENT]
+        if references and ctx.meta.group is not None:
+            seen = {item.get("uuid") for item in items}
+            for item in self.get_project_items(ctx.meta):
+                if item.get("uuid") in seen:
+                    continue
+                if any((uid and uid in (item.get("uuid"), item.get("attachment_id"))) or
+                       (not uid and name in (item.get("name"), self.get_context_filename(item)))
+                       for uid, name in references):
+                    items.append(item)
+                    seen.add(item.get("uuid"))
+        return items
+
+    def current_ids(self, ctx):
+        """Current uploads and explicitly mentioned library sources, by durable ID."""
+        ids = {item.get("uuid") for item in ctx.meta.additional_ctx_current or []}
+        references = [attachment_reference(tag.value) for tag in iter_tags(ctx.input or "")
+                      if tag.kind == KIND_ATTACHMENT]
+        if references:
+            for item in self.get_turn_items(ctx):
+                for uid, name in references:
+                    if (uid and uid in (item.get("uuid"), item.get("attachment_id"))) or (not uid and name in
+                            (item.get("name"), self.get_context_filename(item))):
+                        ids.add(item.get("uuid"))
+        return ids
+
     def get_context_text(
             self,
             ctx: CtxItem,
@@ -131,14 +415,13 @@ class Context:
         meta = ctx.meta
         meta_path = self.get_dir(meta)
         context = ""
-        uuid_current = []
-        if meta.additional_ctx_current:
-            for item in meta.additional_ctx_current:
-                if "uuid" in item:
-                    uuid_current.append(item["uuid"])
+        uuid_current = self.current_ids(ctx)
 
-        if os.path.exists(meta_path) and os.path.isdir(meta_path):
-            for file in meta.get_additional_ctx():
+        turn_items = self.get_turn_items(ctx)
+        if turn_items:
+            for file in turn_items:
+                if not self.is_active(file):
+                    continue
                 if ("type" not in file
                         or file["type"] not in ["local_file", "url"]):
                     continue
@@ -151,7 +434,7 @@ class Context:
 
                 file_id = file["uuid"]
                 file_idx_path = os.path.join(meta_path, file_id)
-                text_path = os.path.join(file_idx_path, file_id + ".txt")
+                text_path = self.get_text_path(meta, file)
                 store_path = file["path"]
                 if "real_path" in file:
                     store_path = file["real_path"]
@@ -159,7 +442,7 @@ class Context:
                     if file["type"] == "url":
                         context += "URL: {}\n".format(file["path"]) + "\n"
                     else:
-                        context += "Filename: {}\n".format(file["name"]) + "\n"
+                        context += "Filename: {}\n".format(self.get_context_filename(file)) + "\n"
 
                 # store used files and URLs in ctx
                 if file["type"] == "url":
@@ -194,33 +477,51 @@ class Context:
         """
         meta = ctx.meta
         meta_path = self.get_dir(meta)
-        query = str(ctx.input)
+        query = str(ctx.final_input)
         if not os.path.exists(meta_path) or not os.path.isdir(meta_path):
             return ""
         idx_path = os.path.join(self.get_dir(meta), self.dir_index)
 
         indexed = False
-        # index files if not indexed by auto_index
-        for i, file in enumerate(meta.get_additional_ctx()):
+        metadata_changed = False
+        has_local_context = False
+        # index local files if not indexed by auto_index; native refs bypass local RAG entirely
+        for i, file in enumerate(self.get_turn_items(ctx)):
+            if not self.is_active(file):
+                if self._remove_item_from_index(meta, file):
+                    metadata_changed = True
+                continue
+            if file.get("type") == "native_file":
+                continue
+            has_local_context = True
             if "indexed" not in file or not file["indexed"]:
                 file_id = file["uuid"]
                 file_idx_path = os.path.join(meta_path, file_id)
-                file_path = os.path.join(file_idx_path, file["name"])
+                stored_name = file.get("stored_name", file["name"])
+                file_path = os.path.join(file_idx_path, stored_name)
                 type = AttachmentItem.TYPE_FILE
                 source = file_path
                 if "type" in file:
                     if file["type"] == "url":
                         type = AttachmentItem.TYPE_URL
                         source = file["path"] # URL
-                doc_ids = self.index_attachment(type, source, idx_path)
+                doc_ids = self.index_attachment(
+                    type,
+                    source,
+                    idx_path,
+                    context_name=self.get_context_filename(file),
+                )
                 file["indexed"] = True
                 file["doc_ids"] = doc_ids
                 indexed = True
 
-        if indexed:
+        if indexed or metadata_changed:
             # update ctx in DB
             self.window.core.ctx.replace(meta)
             self.window.core.ctx.save(meta.id)
+
+        if not has_local_context:
+            return ""
 
         history_data = self.prepare_context_history(history)
         model, model_item = self.get_selected_model("query")
@@ -256,6 +557,11 @@ class Context:
         :param history: history
         :return: query result
         """
+        query = str(ctx.final_input)
+        content = self.get_context_text(ctx, filename=True)
+        if not content:
+            return ""
+
         model, model_item = self.get_selected_model("summary")
         if model_item is None:
             raise Exception("Attachments: summary model not found: {}".format(model))
@@ -263,8 +569,6 @@ class Context:
         if self.is_verbose():
             print("Attachments: using summary model: {}".format(model))
 
-        query = str(ctx.input)
-        content = self.get_context_text(ctx, filename=True)
         prompt = self.summary_prompt.format(
             query=str(query).strip(),
             content=str(content).strip(),
@@ -342,16 +646,21 @@ class Context:
         :param real_path: real path
         :return: Dict with attachment data
         """
+        # Uploads always extract full content; indexes are managed separately.
+        auto_index = False
         if self.is_verbose():
-            if meta.group:
-                print("Uploading for meta group ID: {}".format(meta.group.id))
+            if self.is_project_share_enabled(meta):
+                print("Uploading for project ID: {}".format(meta.group.id))
             else:
                 print("Uploading for meta ID: {}".format(meta.id))
 
         # prepare idx dir
         name = os.path.basename(attachment.path)
         file_id = str(uuid.uuid4())
-        meta_path = self.get_dir(meta)
+        meta_path = self.get_dir(
+            meta,
+            project_scope=meta.group is not None,
+        )
         file_idx_path = os.path.join(meta_path, file_id)
         index_path = os.path.join(meta_path, self.dir_index)
 
@@ -374,6 +683,8 @@ class Context:
         content, docs = self.read_content(attachment, src_file, prompt)
         if attachment.type == AttachmentItem.TYPE_FILE:
             documents = docs
+            context_name = self.get_attachment_context_name(attachment, real_path)
+            self.normalize_attachment_document_metadata(documents, context_name)
 
         if content:
             text_path = os.path.join(file_idx_path, file_id + ".txt")
@@ -400,10 +711,18 @@ class Context:
             source = src_file
             if attachment.type == AttachmentItem.TYPE_URL:
                 source = attachment.path  # URL
-            doc_ids = self.index_attachment(attachment.type, source, index_path, documents=documents)
+            doc_ids = self.index_attachment(
+                attachment.type,
+                source,
+                index_path,
+                documents=documents,
+                context_name=self.get_attachment_context_name(attachment, real_path),
+            )
 
         result = {
+            "active": True,
             "name": name,
+            "context_name": self.get_attachment_context_name(attachment, real_path),
             "path": attachment.path,
             "type": type,
             "uuid": str(file_id),
@@ -417,6 +736,10 @@ class Context:
             result["indexed"] = True
             result["doc_ids"] = doc_ids
 
+        if attachment.type == AttachmentItem.TYPE_URL:
+            for key in ('loader', 'loader_name', 'loader_icon'):
+                if attachment.extra.get(key):
+                    result[key] = attachment.extra[key]
         if real_path:
             result["real_path"] = real_path
 
@@ -424,6 +747,133 @@ class Context:
             print("Attachments: uploaded: {}".format(result))
 
         return result
+
+    def create_native_item(
+            self,
+            attachment: AttachmentItem,
+            native_ref: Dict[str, Any],
+            real_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create additional-context metadata for a provider-native file without reading it locally."""
+        size = int(native_ref.get("size", 0) or 0)
+        if not size and attachment.path and os.path.isfile(attachment.path):
+            try:
+                size = os.path.getsize(attachment.path)
+            except OSError:
+                size = 0
+        result = {
+            "active": True,
+            "name": os.path.basename(str(attachment.path or attachment.name or "")),
+            "context_name": self.get_attachment_context_name(attachment, real_path),
+            "path": attachment.path,
+            "type": "native_file",
+            "uuid": str(uuid.uuid4()),
+            "content_type": "native",
+            "size": size,
+            "length": 0,
+            "tokens": 0,
+            "indexed": False,
+            "native": True,
+            "native_provider": native_ref.get("provider"),
+            "native_id": native_ref.get("id"),
+            "native_uri": native_ref.get("uri"),
+            "native_mime_type": native_ref.get("mime_type"),
+        }
+        if real_path:
+            result["real_path"] = real_path
+        return result
+
+    @staticmethod
+    def _normalize_context_path(path: str) -> str:
+        """Normalize a model-facing attachment path without exposing local filesystem paths."""
+        value = str(path or "").replace("\\", "/")
+        while value.startswith("./"):
+            value = value[2:]
+        return value.lstrip("/")
+
+    def get_attachment_context_name(
+            self,
+            attachment: AttachmentItem,
+            real_path: Optional[str] = None
+    ) -> str:
+        """Return the source name that may safely be exposed to the model."""
+        attachment_path = str(attachment.path or "")
+        is_archive_member = bool(
+            real_path
+            and attachment_path
+            and os.path.normcase(os.path.normpath(str(real_path)))
+            != os.path.normcase(os.path.normpath(attachment_path))
+        )
+        if is_archive_member:
+            name = getattr(attachment, "name", None)
+            if name:
+                normalized = self._normalize_context_path(name)
+                if normalized:
+                    return normalized
+        return os.path.basename(attachment_path)
+
+    def get_context_filename(self, item: Dict[str, Any]) -> str:
+        """Return a safe filename/relative archive member path for additional context."""
+        explicit = item.get("context_name")
+        if explicit:
+            return self._normalize_context_path(explicit)
+
+        archive_member = item.get("archive_member")
+        if archive_member:
+            return self._normalize_context_path(archive_member)
+
+        # Backward compatibility for archive entries created before context_name
+        # and archive_member were stored. Their `name` was already rewritten to
+        # the path relative to the archive root.
+        if item.get("stored_name") and item.get("real_path"):
+            name = item.get("name")
+            if name:
+                normalized = self._normalize_context_path(name)
+                archive_name = os.path.basename(str(item.get("real_path") or ""))
+                prefix = f"{archive_name}/" if archive_name else ""
+                if prefix and normalized.startswith(prefix):
+                    normalized = normalized[len(prefix):]
+                if normalized:
+                    return normalized
+
+        # Never expose the original absolute path for regular files.
+        candidate = item.get("name") or item.get("real_path") or item.get("path") or ""
+        normalized = str(candidate).replace("\\", "/").rstrip("/")
+        return normalized.rsplit("/", 1)[-1] if normalized else ""
+
+    def normalize_attachment_document_metadata(
+            self,
+            documents: Optional[List[Document]],
+            context_name: str
+    ):
+        """Remove local filesystem paths from attachment metadata used by RAG."""
+        if not documents:
+            return
+        safe_path = self._normalize_context_path(context_name)
+        safe_name = safe_path.rsplit("/", 1)[-1] if safe_path else ""
+        for doc in documents:
+            metadata = getattr(doc, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+
+            # Standard LlamaIndex file metadata can contain the full local path.
+            # Keep the metadata keys, but replace path values with a model-safe
+            # filename or archive-relative path.
+            for key in ("file_path", "filepath", "source_path"):
+                if key in metadata:
+                    metadata[key] = safe_path
+            for key in ("file_name", "filename"):
+                if key in metadata:
+                    metadata[key] = safe_path or safe_name
+
+            # Custom metadata can use a generic `path` key. Only rewrite it when
+            # it clearly contains an absolute/local path rather than arbitrary text.
+            if "path" in metadata and isinstance(metadata["path"], str):
+                value = metadata["path"]
+                if os.path.isabs(value) or "\\" in value:
+                    metadata["path"] = safe_path
+
+            doc.metadata = metadata
 
     def read_content(
             self,
@@ -443,7 +893,7 @@ class Context:
         docs = []
         if attachment.type == AttachmentItem.TYPE_FILE:
             loader_kwargs = {
-                "prompt": prompt,
+                "prompt": mentions_to_model_text(prompt),
             }  # extra loader kwargs
             content, docs = self.window.core.idx.indexing.read_text_content(
                 path=path,
@@ -485,7 +935,10 @@ class Context:
                 url="",
                 type=loader,
                 extra_args=input_params,
+                raise_on_error=True,
             )
+            if not str(content or "").strip():
+                raise ValueError(f"Web reader {loader!r} returned no content for {attachment.path}")
             # src file save
             name = "url.txt"
             path = os.path.join(dir, name)
@@ -500,7 +953,8 @@ class Context:
             type: str,
             source: str,
             idx_path: str,
-            documents: Optional[List[Document]] = None
+            documents: Optional[List[Document]] = None,
+            context_name: Optional[str] = None
     ) -> list:
         """
         Index attachment
@@ -509,11 +963,16 @@ class Context:
         :param source: source file or URL
         :param idx_path: index path
         :param documents: list of documents (optional)
+        :param context_name: model-facing filename or archive-relative path
         :return: list of doc IDs
         """
         model, model_item = self.get_selected_model("query")
         doc_ids = []
         if type == AttachmentItem.TYPE_FILE:
+            if context_name:
+                if documents is None:
+                    documents = self.window.core.idx.indexing.get_documents(source)
+                self.normalize_attachment_document_metadata(documents, context_name)
             doc_ids = self.window.core.idx.indexing.index_attachment(source, idx_path, model_item, documents)
         elif type == AttachmentItem.TYPE_URL:
             doc_ids = self.window.core.idx.indexing.index_attachment_web(source, idx_path, model_item, documents)
@@ -523,22 +982,97 @@ class Context:
 
     def get_all(self, meta: CtxMeta) -> list:
         """
-        Get all attachments for meta
+        Get all raw attachments for meta.
+
+        Archive members intentionally remain separate here because each member
+        keeps its own extracted text/index data used by the model.
 
         :param meta: CtxMeta instance
-        :return: list of attachments
+        :return: list of raw attachments
         """
-        return meta.get_additional_ctx()
+        return self.get_meta_items(meta)
 
-    def get_dir(self, meta: CtxMeta) -> str:
+    def get_display_all(self, meta: CtxMeta) -> list:
         """
-        Get directory for meta
+        Get attachments grouped for UI presentation.
+
+        Files extracted from one archive are represented by a single synthetic
+        row while the underlying additional context stays untouched.
 
         :param meta: CtxMeta instance
+        :return: list of UI attachment dicts
+        """
+        result = []
+        for group in group_additional_ctx_items(self.get_meta_items(meta)):
+            members = group["items"]
+            if not members:
+                continue
+
+            if not group["archive"]:
+                display_item = copy.copy(members[0])
+                display_item["active"] = self.is_active(members[0])
+                if display_item.get("native"):
+                    display_item["name"] = f'{display_item.get("name", "No name")} (Native)'
+                display_item["_ctx_items"] = members
+                display_item["_archive"] = False
+                result.append(display_item)
+                continue
+
+            first = members[0]
+            display_item = copy.copy(first)
+            archive_path = first.get("archive_path") or first.get("real_path") or first.get("path") or ""
+            archive_name = first.get("archive_name") or os.path.basename(str(archive_path)) or first.get("name", "No name")
+            count = len(members)
+            suffix = "file" if count == 1 else "files"
+
+            native_count = sum(1 for item in members if item.get("native"))
+            native_suffix = ""
+            if native_count == count:
+                native_suffix = " (Native)"
+            elif native_count > 0:
+                native_suffix = f" ({native_count} Native)"
+            display_item["name"] = f"{archive_name} ({count} {suffix}){native_suffix}"
+            display_item["path"] = archive_path
+            display_item["real_path"] = archive_path
+            display_item["length"] = sum(int(item.get("length", 0) or 0) for item in members)
+            display_item["tokens"] = sum(int(item.get("tokens", 0) or 0) for item in members)
+            display_item["indexed"] = bool(members) and all(bool(item.get("indexed")) for item in members)
+            display_item["active"] = bool(members) and all(self.is_active(item) for item in members)
+            display_item["_ctx_items"] = members
+            display_item["_archive"] = True
+
+            if archive_path and os.path.isfile(archive_path):
+                try:
+                    display_item["size"] = os.path.getsize(archive_path)
+                except OSError:
+                    display_item["size"] = sum(int(item.get("size", 0) or 0) for item in members)
+            else:
+                display_item["size"] = sum(int(item.get("size", 0) or 0) for item in members)
+
+            result.append(display_item)
+
+        return result
+
+    def get_dir(
+            self,
+            meta: CtxMeta,
+            project_scope: Optional[bool] = None
+    ) -> str:
+        """
+        Get directory for meta.
+
+        Project storage is used only when project-wide sharing is enabled. When
+        no explicit scope is supplied, the directory follows the attachment set
+        currently visible for the context.
+
+        :param meta: CtxMeta instance
+        :param project_scope: force project/local storage scope
         :return: directory path
         """
+        if project_scope is None:
+            project_scope = self._use_project_scope(meta)
         meta_uuid = str(meta.uuid)
-        if meta.group:
+        if project_scope and meta.group is not None:
             meta_uuid = str(meta.group.uuid)
         return os.path.join(self.window.core.config.get_user_dir("ctx_idx"), meta_uuid)
 
@@ -591,12 +1125,15 @@ class Context:
 
     def count(self, meta: CtxMeta) -> int:
         """
-        Count attachments for meta
+        Count attachments as presented in the UI.
+
+        An archive counts as one visible attachment regardless of the number of
+        extracted files stored in additional context.
 
         :param meta: CtxMeta instance
-        :return: number of attachments
+        :return: number of visible attachments
         """
-        return len(meta.get_additional_ctx())
+        return len(self.get_display_all(meta))
 
     def delete(
             self,
@@ -604,65 +1141,89 @@ class Context:
             item: Dict[str, Any],
             delete_files: bool = False
     ):
-        """
-        Delete attachment
-
-        :param meta: CtxMeta instance
-        :param item: Attachment item dict
-        :param delete_files: delete files
-        """
-        meta.remove_additional_ctx(item)
-        self.window.core.ctx.save(meta.id)
+        """Delete one attachment from its effective local/project scope."""
+        project_scope = self._item_project_scope(meta, item)
+        if not project_scope:
+            meta = self.get_item_owner(meta, item)
+        items = self._scope_items(meta, project_scope)
+        if item in items:
+            items.remove(item)
+        self.save_owner(meta)
         if delete_files:
-            self.delete_local(meta, item)
-        if len(meta.get_additional_ctx()) == 0:
-            self.delete_index(meta)
+            self.delete_local(meta, item, project_scope=project_scope)
+        if len(items) == 0:
+            self.delete_index(meta, project_scope=project_scope)
+        if meta.group is not None:
+            self.refresh_share_flags(meta)
 
-    def delete_by_meta(self, meta: CtxMeta):
-        """
-        Delete all attachments for meta
-
-        :param meta: CtxMeta instance
-        """
-        self.delete_index(meta)
-
-    def delete_by_meta_id(self, meta_id: int):
-        """
-        Delete all attachments for meta by id
-
-        :param meta_id: Meta id
-        """
-        meta = self.window.core.ctx.get_meta_by_id(meta_id)
-        if meta is not None:
-            self.delete_index(meta)
-
-    def reset_by_meta(
+    def delete_display_item(
             self,
             meta: CtxMeta,
+            item: Dict[str, Any],
             delete_files: bool = False
     ):
-        """
-        Delete all attachments for meta
+        """Delete one UI row, including every member represented by an archive row."""
+        members = item.get("_ctx_items") if isinstance(item, dict) else None
+        if not members:
+            members = [item]
 
-        :param meta: CtxMeta instance
-        :param delete_files: delete files
-        """
-        meta.reset_additional_ctx()
-        self.window.core.ctx.save(meta.id)
+        visible = self.get_meta_items(meta)
+        for member in list(members):
+            if member in visible:
+                self.delete(meta, member, delete_files=delete_files)
+
+    def preserve_project_sources(self, meta):
+        """Keep shared knowledge independent of a source conversation's lifetime."""
+        if not self.is_project_share_enabled(meta) or not meta.additional_ctx:
+            return
+        group = meta.group
+        existing = {item.get("uuid") for item in group.additional_ctx or []}
+        pending = []
+        local_root = self.get_dir(meta, project_scope=False)
+        project_root = self.get_dir(meta, project_scope=True)
+        for item in meta.additional_ctx:
+            uid = item.get("uuid")
+            if not uid or uid in existing:
+                continue
+            source = os.path.join(local_root, uid)
+            target = os.path.join(project_root, uid)
+            if os.path.isdir(source):
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            shared = copy.deepcopy(item)
+            shared["owner_meta_id"] = meta.id
+            shared["indexed"] = False
+            shared["doc_ids"] = []
+            pending.append(shared)
+            existing.add(uid)
+        if pending:
+            group.additional_ctx = list(group.additional_ctx or []) + pending
+            self.window.core.ctx.update_group(group)
+
+    def delete_by_meta(self, meta: CtxMeta):
+        """Delete conversation storage while preserving the project's library."""
+        self.preserve_project_sources(meta)
+        self.delete_index(meta, project_scope=False)
+
+    def delete_by_meta_id(self, meta_id: int):
+        meta = self.window.core.ctx.get_meta_by_id(meta_id)
+        if meta is not None:
+            self.delete_by_meta(meta)
+
+    def reset_by_meta(self, meta: CtxMeta, delete_files: bool = False):
+        """Reset one conversation without clearing other project conversations."""
+        self.preserve_project_sources(meta)
+        meta.additional_ctx = []
+        meta.additional_ctx_current = []
+        self.save_owner(meta)
         if delete_files:
-            self.delete_index(meta)
+            self.delete_index(meta, project_scope=False)
 
     def reset_by_meta_id(
             self,
             meta_id: int,
             delete_files: bool = False
     ):
-        """
-        Delete all attachments for meta by id
-
-        :param meta_id: Meta id
-        :param delete_files: delete files
-        """
+        """Delete all attachments for meta by id."""
         meta = self.window.core.ctx.get_meta_by_id(meta_id)
         if meta is not None:
             self.reset_by_meta(meta, delete_files)
@@ -672,24 +1233,18 @@ class Context:
             meta: CtxMeta,
             delete_files: bool = False
     ):
-        """
-        Clear all attachments by ctx meta
+        """Clear the visible library, respecting every item's storage owner."""
+        items = self.get_project_items(meta) if meta.group is not None else self.get_meta_items(meta)
+        for item in list(items):
+            self.delete(meta, item, delete_files=delete_files)
 
-        :param meta: CtxMeta instance
-        :param delete_files: delete files
-        """
-        meta.reset_additional_ctx()
-        self.window.core.ctx.save(meta.id)
-        if delete_files:
-            self.delete_index(meta)
-
-    def delete_index(self, meta: CtxMeta):
-        """
-        Delete index by ctx meta
-
-        :param meta: CtxMeta instance
-        """
-        meta_path = self.get_dir(meta)
+    def delete_index(
+            self,
+            meta: CtxMeta,
+            project_scope: Optional[bool] = None
+    ):
+        """Delete attachment index/storage directory for the requested scope."""
+        meta_path = self.get_dir(meta, project_scope=project_scope)
         if os.path.exists(meta_path) and os.path.isdir(meta_path):
             shutil.rmtree(meta_path)
             if self.is_verbose():
@@ -698,16 +1253,12 @@ class Context:
     def delete_local(
             self,
             meta: CtxMeta,
-            item: Dict[str, Any]
+            item: Dict[str, Any],
+            project_scope: Optional[bool] = None
     ):
-        """
-        Delete local attachment
-
-        :param meta: CtxMeta instance
-        :param item: additional context item
-        """
+        """Delete one attachment's local files/index records."""
         file_id = item["uuid"]
-        meta_path = self.get_dir(meta)
+        meta_path = self.get_dir(meta, project_scope=project_scope)
         index_path = os.path.join(meta_path, self.dir_index)
         file_idx_path = os.path.join(meta_path, file_id)
         if item["type"] == "local_file":
@@ -718,7 +1269,6 @@ class Context:
                         print("Attachment deleted: {}".format(f))
                 os.rmdir(file_idx_path)
 
-        # delete from index
         if "doc_ids" in item and isinstance(item["doc_ids"], list):
             for doc_id in item["doc_ids"]:
                 self.window.core.idx.indexing.remove_attachment(index_path, doc_id)

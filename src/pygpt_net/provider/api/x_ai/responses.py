@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.02.06 03:00:00                  #
+# Updated Date: 2026.08.12 12:00:00                  #
 # ================================================== #
 
 from __future__ import annotations
@@ -19,6 +19,9 @@ from pygpt_net.core.bridge.context import BridgeContext, MultimodalContext
 from pygpt_net.item.attachment import AttachmentItem
 from pygpt_net.item.ctx import CtxItem
 from pygpt_net.item.model import ModelItem
+from pygpt_net.provider.api.reasoning import (
+    ensure_reasoning_metadata, is_realtime_reasoning_enabled, store_reasoning,
+)
 
 # xAI SDK chat helpers (system/user/assistant/image) for message building
 from xai_sdk.chat import (
@@ -26,6 +29,7 @@ from xai_sdk.chat import (
     user as xuser,
     assistant as xassistant,
     image as ximage,
+    file as xfile,
     tool_result as xtool_result
 )
 
@@ -78,6 +82,7 @@ class Responses:
         stream = context.stream
         history = context.history
         ctx = context.ctx or CtxItem()
+        self.window.core.context_manager.mark_request_generation(ctx)
 
         client = self.window.core.api.xai.get_client(context.mode, model_item)
 
@@ -104,19 +109,19 @@ class Responses:
         has_images = self._attachments_have_images(attachments)
         model_id = model_item.id
         if has_images and not self._is_vision_model(model_item):
-            fb = self.window.core.config.get("xai_vision_fallback_model") or "grok-2-vision-latest"
+            fb = self.window.core.config.get("xai_vision_fallback_model") or "grok-4.5-latest"
             self.window.core.debug.info(f"[xai] Switching to vision model: {fb} (was: {model_id}) due to image input")
             model_id = fb
 
         # Tools-capable model fallback for Agent Tools (legacy grok-3 does not support server-side tools)
         if srv_tools and str(model_item.id or "").lower().startswith("grok-3"):
-            fb_tools = self.window.core.config.get("xai_tools_fallback_model") or "grok-4-latest"
+            fb_tools = self.window.core.config.get("xai_tools_fallback_model") or "grok-4.5-latest"
             self.window.core.debug.info(f"[xai] Switching to tools-capable model: {fb_tools} (was: {model_id}) due to server-side tools")
             model_id = fb_tools
 
         # Store messages: false when images present (SDK guidance), otherwise configurable (default True)
         store_messages = True
-        cfg_store = self.window.core.config.get("remote_tools.xai.store_messages")
+        cfg_store = self.window.core.llm.get("x_ai").get_remote_tool_config("store_messages")
         if cfg_store is not None:
             try:
                 store_messages = bool(cfg_store)
@@ -125,8 +130,10 @@ class Responses:
         if has_images:
             store_messages = False
 
-        # previous_response_id from last history item or current ctx
-        prev_id = self._detect_previous_response_id(history, ctx)
+        # previous_response_id from last history item or current ctx. A context
+        # generation rollover deliberately breaks the server-side chain.
+        break_server_chain = self.window.core.context_manager.should_break_server_chain(history, ctx)
+        prev_id = None if break_server_chain else self._detect_previous_response_id(history, ctx)
 
         # Create chat session in SDK
         chat_kwargs: Dict[str, Any] = {
@@ -140,7 +147,15 @@ class Responses:
             chat_kwargs["use_encrypted_content"] = True
         if isinstance(max_turns, int) and max_turns > 0:
             chat_kwargs["max_turns"] = max_turns
+        reasoning_effort = self.window.core.models.get_reasoning_effort(model_item)
+        if reasoning_effort:
+            chat_kwargs["reasoning_effort"] = reasoning_effort
 
+        self.window.core.api.logger.log_input(
+            type="chat.create", provider="xai", kwargs=chat_kwargs,
+            input=prompt, history=history, extra=extra, model=model_id,
+            path="client.chat.create",
+        )
         chat = client.chat.create(**chat_kwargs)
 
         # Append history (only when not continuing via previous_response_id)
@@ -151,8 +166,11 @@ class Responses:
             history=history if prev_id is None else None,  # do not duplicate when chaining
         )
 
-        # If last turn contained client-side tool outputs, append them first
-        self._append_tool_results_from_ctx(chat, history)
+        # Client-side tool outputs are valid only as an immediate continuation of
+        # their matching call. After a generation rollover that call belongs to
+        # the old server chain, so replaying the result would orphan it.
+        if not break_server_chain:
+            self._append_tool_results_from_ctx(chat, history)
 
         # Append current user message (with images if any)
         self.append_current_user_sdk(
@@ -168,6 +186,9 @@ class Responses:
 
         # NON-STREAM
         response = chat.sample()
+        self.window.core.api.logger.log_output(
+            type="chat.sample", provider="xai", output=response, model=model_id,
+        )
         return response
 
     # ---------- UNPACK (non-stream) ----------
@@ -180,6 +201,8 @@ class Responses:
         :param response: Response object from SDK or dict
         :param ctx: CtxItem to fill
         """
+        show_reasoning = is_realtime_reasoning_enabled(self.window)
+
         # Output text
         out = ""
         try:
@@ -190,6 +213,24 @@ class Responses:
             out = response.get("output_text") or ""
 
         ctx.output = (str(out or "")).strip()
+
+        # Grok 4.6 can return a readable summarized reasoning trace separately
+        # from the final answer.  Keep it outside ctx.output so it is rendered
+        # for the user but is not replayed as ordinary assistant text.
+        if show_reasoning:
+            try:
+                reasoning = self._extract_reasoning_content(response)
+                if reasoning:
+                    store_reasoning(
+                        ctx=ctx,
+                        provider="xai",
+                        text=reasoning,
+                        kind="reasoning_summary",
+                        raw=False,
+                        visible=True,
+                    )
+            except Exception:
+                pass
 
         # Citations (list of urls)
         try:
@@ -259,6 +300,8 @@ class Responses:
                     "reasoning_tokens": u.get("reasoning", 0),
                     "total_reported": u.get("total"),
                 }
+                if show_reasoning:
+                    ensure_reasoning_metadata(ctx, "xai", u.get("reasoning", 0))
         except Exception:
             pass
 
@@ -332,6 +375,8 @@ class Responses:
         parts = [str(prompt or "")]
         for img in self.window.core.api.xai.vision.build_images_for_chat(attachments):
             parts.append(ximage(img))
+        for ref in self.window.core.attachments.native.get_refs(attachments, "x_ai", include_meta=False):
+            parts.append(xfile(ref["id"]))
         chat.append(xuser(*parts))
 
     def _append_tool_results_from_ctx(self, chat, history: Optional[List[CtxItem]]):
@@ -394,6 +439,40 @@ class Responses:
         messages.append({"role": "user", "content": str(prompt)})
         return messages
 
+    @staticmethod
+    def _extract_reasoning_content(response) -> str:
+        """Best-effort extraction of xAI's readable reasoning summary."""
+        value = None
+        if isinstance(response, dict):
+            value = response.get("reasoning_content")
+            if value is None:
+                reasoning = response.get("reasoning")
+                if isinstance(reasoning, dict):
+                    value = reasoning.get("summary") or reasoning.get("content")
+        else:
+            value = getattr(response, "reasoning_content", None)
+            if value is None:
+                reasoning = getattr(response, "reasoning", None)
+                value = getattr(reasoning, "summary", None) if reasoning is not None else None
+
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+                else:
+                    text = getattr(item, "text", None) or getattr(item, "content", None)
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts).strip()
+        return ""
+
     def _normalize_usage(self, raw) -> Optional[dict]:
         """
         Normalize usage to a common dict: {'in','out','reasoning','total'}.
@@ -439,16 +518,8 @@ class Responses:
         return False
 
     def _is_vision_model(self, model: ModelItem) -> bool:
-        """
-        Heuristic check for vision-capable model IDs.
-        """
-        model_id = (model.id if model and model.id else "").strip()
-        if not model or not model_id:
-            return False
-        if model.is_image_input():
-            return True
-        mid = model_id.lower()
-        return ("vision" in mid) or ("-v" in mid and "grok" in mid)
+        """Return whether model metadata declares Image input support."""
+        return bool(model and model.is_image_input())
 
     def _looks_like_client_tool(self, tc_obj) -> bool:
         """
@@ -470,6 +541,8 @@ class Responses:
         Return last response id from history or current ctx when available.
         """
         try:
+            if self.window.core.context_manager.should_break_server_chain(history, ctx):
+                return None
             if history and len(history) > 0:
                 last = history[-1]
                 if last and last.msg_id:

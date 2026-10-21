@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.25 20:00:00                  #
+# Updated Date: 2026.09.30 08:14:00
 # ================================================== #
 
 import json
@@ -15,21 +15,25 @@ from dataclasses import dataclass, field
 
 from pygpt_net.core.types import (
     MODE_CHAT,
+    MODE_LLAMA_INDEX,
     MODE_VISION,
     MULTIMODAL_IMAGE,
     MODE_AUDIO,
     MULTIMODAL_AUDIO,
-    OPENAI_COMPATIBLE_PROVIDERS,
     MULTIMODAL_VIDEO,
 )
+from pygpt_net.provider.core.model.compat import is_openai_o_series
 
 @dataclass(slots=True)
 class ModelItem:
     id: Optional[str] = None
     ctx: int = 0
+    custom_api_endpoint: str = ""
+    custom_api_key: str = ""
     default: bool = False
     extra: dict = field(default_factory=dict)
     imported: bool = False
+    is_hidden: bool = False
     input: list = field(default_factory=lambda: ["text"])
     langchain: dict = field(default_factory=dict)
     llama_index: dict = field(default_factory=dict)
@@ -38,6 +42,7 @@ class ModelItem:
     name: Optional[str] = None
     output: list = field(default_factory=lambda: ["text"])
     provider: str = "openai"
+    reasoning_effort: bool = False
     tokens: int = 0
     tool_calls: bool = False
 
@@ -48,10 +53,13 @@ class ModelItem:
         :param id: Model ID
         """
         self.ctx = 0
+        self.custom_api_endpoint = ""
+        self.custom_api_key = ""
         self.default = False
         self.extra = {}
         self.id = id
         self.imported = False
+        self.is_hidden = False
         self.input = ["text"]  # multimodal support: image, audio, etc.
         self.langchain = {}
         self.llama_index = {}
@@ -60,6 +68,7 @@ class ModelItem:
         self.name = None
         self.output = ["text"]  # multimodal support: image, audio, etc.
         self.provider = "openai"  # default provider
+        self.reasoning_effort = False  # allow runtime reasoning-effort selection
         self.tokens = 0
         self.tool_calls = False  # native tool calls available
 
@@ -71,6 +80,10 @@ class ModelItem:
         """
         if 'ctx' in data:
             self.ctx = data['ctx']
+        if 'custom_api_endpoint' in data:
+            self.custom_api_endpoint = data['custom_api_endpoint'] or ""
+        if 'custom_api_key' in data:
+            self.custom_api_key = data['custom_api_key'] or ""
         if 'default' in data:
             self.default = data['default']
         if 'extra' in data:
@@ -79,19 +92,27 @@ class ModelItem:
             self.id = data['id']
         if 'imported' in data:
             self.imported = data['imported']
+        if 'is_hidden' in data:
+            self.is_hidden = data['is_hidden']
         if 'input' in data:
-            input = data['input'].replace(' ', '')
-            self.input = input.split(',')
+            self.input = self._normalize_list(data['input'])
         if 'mode' in data:
-            mode = data['mode'].replace(' ', '')
-            self.mode = mode.split(',')
+            self.mode = self._normalize_list(data['mode'])
+            # Backward compatibility: old models configured only for the
+            # removed Chat with Files mode are regular Chat models now.
+            # Keep the legacy flag and add Chat so the model becomes visible
+            # in Chat immediately and the normalized mode list is persisted
+            # on the next regular model save.
+            if MODE_LLAMA_INDEX in self.mode and MODE_CHAT not in self.mode:
+                self.mode.append(MODE_CHAT)
         if 'name' in data:
             self.name = data['name']
         if 'output' in data:
-            output = data['output'].replace(' ', '')
-            self.output = output.split(',')
+            self.output = self._normalize_list(data['output'])
         if 'provider' in data:
             self.provider = data['provider']
+        if 'reasoning_effort' in data:
+            self.reasoning_effort = bool(data['reasoning_effort'])
         if 'tokens' in data:
             self.tokens = data['tokens']
         if 'tool_calls' in data:
@@ -104,6 +125,36 @@ class ModelItem:
             self.llama_index['args'] = data['llama_index.args']
         if 'llama_index.env' in data:
             self.llama_index['env'] = data['llama_index.env']
+
+    @staticmethod
+    def _normalize_list(value) -> list:
+        """
+        Normalize model list fields loaded from config/editor values.
+
+        Persisted model definitions use comma-separated strings. Accept a
+        list as well for callers that already provide normalized values, but
+        keep the editor bool-list contract unchanged.
+
+        :param value: comma-separated string or iterable of values
+        :return: normalized list of non-empty strings
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            values = value.split(',')
+        elif isinstance(value, (list, tuple, set)):
+            values = value
+        else:
+            values = [value]
+
+        result = []
+        for item in values:
+            if item is None:
+                continue
+            item = str(item).strip()
+            if item:
+                result.append(item)
+        return result
 
     def to_dict(self) -> dict:
         """
@@ -118,11 +169,15 @@ class ModelItem:
             'input': ','.join(self.input),
             'output': ','.join(self.output),
             'ctx': self.ctx,
+            'custom_api_endpoint': self.custom_api_endpoint,
+            'custom_api_key': self.custom_api_key,
             'tokens': self.tokens,
             'default': self.default,
             'extra': self.extra,
             'imported': self.imported,
+            'is_hidden': self.is_hidden,
             'provider': self.provider,
+            'reasoning_effort': self.reasoning_effort,
             'tool_calls': self.tool_calls,
             'llama_index.args': [],
             'llama_index.env': []
@@ -157,14 +212,18 @@ class ModelItem:
 
     def is_supported(self, mode: str) -> bool:
         """
-        Check if model supports mode
+        Check if model supports a user-facing mode.
+
+        Transport/backend support is resolved separately by Bridge.  In
+        particular, Chat is no longer synonymous with the OpenAI-compatible
+        API transport.  ``llama_index`` in old model configs is kept only as a
+        backward-compatible alias for Chat.
 
         :param mode: Mode
         :return: True if supported
         """
-        if mode == MODE_CHAT and not self.is_openai_supported():
-            # only OpenAI API compatible models are supported in Chat mode
-            return False
+        if mode == MODE_CHAT:
+            return MODE_CHAT in self.mode or MODE_LLAMA_INDEX in self.mode
         return mode in self.mode
 
     def is_multimodal(self) -> bool:
@@ -174,14 +233,6 @@ class ModelItem:
         :return: True if multimodal
         """
         return len(self.multimodal) > 0
-
-    def is_openai_supported(self) -> bool:
-        """
-        Check if model is supported by OpenAI API (or compatible)
-
-        :return: True if OpenAI compatible
-        """
-        return self.provider in OPENAI_COMPATIBLE_PROVIDERS
 
     def is_gpt(self) -> bool:
         """
@@ -197,12 +248,8 @@ class ModelItem:
 
         if (self.id.startswith("gpt-")
                 or self.id.startswith("chatgpt")
-                or self.id.startswith("o1")
-                or self.id.startswith("o3")
-                or self.id.startswith("o4")
-                or self.id.startswith("o5")
+                or is_openai_o_series(self.id)
                 or self.id.startswith("codex-")
-                or self.id.startswith("dall-e-")
                 or self.id.startswith("computer-use")):
             return True
         return False
@@ -231,15 +278,15 @@ class ModelItem:
 
     def get_ollama_model(self) -> str:
         """
-        Get Ollama model ID
+        Get Ollama model ID (name used for ollama pull / API).
 
-        :return: model ID
+        :return: model ID, or self.id when no "model" arg is set (e.g. custom/non-default list)
         """
         if "args" in self.llama_index:
             for arg in self.llama_index["args"]:
-                if arg["name"] == "model":
-                    return arg["value"]
-        return ""
+                if arg["name"] == "model" and arg.get("value"):
+                    return (arg["value"] or "").strip()
+        return (self.id or "").strip()
 
     def has_mode(self, mode: str) -> bool:
         """

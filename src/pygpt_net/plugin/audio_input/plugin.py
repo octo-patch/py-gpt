@@ -6,13 +6,14 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.31 23:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 import os
 
 from PySide6.QtCore import Slot
 
+from pygpt_net.core.tabs.tab import Tab
 from pygpt_net.core.bridge.context import BridgeContext
 from pygpt_net.plugin.base.plugin import BasePlugin
 from pygpt_net.provider.audio_input.base import BaseProvider
@@ -21,7 +22,6 @@ from pygpt_net.item.ctx import CtxItem
 from pygpt_net.utils import trans
 
 from .config import Config
-from .worker import Worker
 from .simple import Simple
 from ...core.types import MODE_AUDIO
 
@@ -31,6 +31,7 @@ class Plugin(BasePlugin):
         super(Plugin, self).__init__(*args, **kwargs)
         self.handler_simple = Simple(self)
         self.id = "audio_input"
+        self.is_common_plugin = True
         self.name = "Audio Input"
         self.type = [
             'audio.input',
@@ -51,7 +52,16 @@ class Plugin(BasePlugin):
         self.order = 1
         self.use_locale = True
         self.input_file = "input.wav"
+        self.provider_preparing = False
+        self._transcription_loaders = {}
         self.config = Config(self)
+
+    def get_input_path(self) -> str:
+        """Return the temporary audio input path."""
+        return os.path.join(
+            self.window.core.config.get_user_dir("tmp"),
+            self.input_file,
+        )
 
     def init_options(self):
         """Initialize options"""
@@ -81,7 +91,17 @@ class Plugin(BasePlugin):
         options = []
         providers = self.get_providers()
         for id in providers:
-            options.append({id: providers[id].name})
+            provider = providers[id]
+            domain = provider.get_locale_domain() if hasattr(provider, "get_locale_domain") else None
+            if domain:
+                label = {
+                    "key": "provider.name",
+                    "domain": domain,
+                    "fallback": provider.name,
+                }
+            else:
+                label = provider.name
+            options.append({id: label})
         return options
 
     def init_tabs(self) -> dict:
@@ -94,7 +114,7 @@ class Plugin(BasePlugin):
         tabs["general"] = "General"
         providers = self.get_providers()
         for id in providers:
-            tabs[id] = providers[id].name
+            tabs[id] = providers[id].get_name() if hasattr(providers[id], "get_name") else providers[id].name
         return tabs
 
     def setup_ui(self):
@@ -124,6 +144,89 @@ class Plugin(BasePlugin):
             words = words_str.split(',')
             words = [x.strip() for x in words]  # remove white-spaces
         return words
+
+    def _whisper_packages_installed(self, ok):
+        if not ok:
+            return
+        try:
+            provider = self.get_provider()
+            if provider.id != "openai_whisper_local":
+                return
+            if provider.is_configured():
+                self.ensure_provider_ready()
+            else:
+                self.window.ui.dialogs.alert(provider.get_config_message())
+        except Exception as exc:
+            self.window.ui.dialogs.alert(str(exc))
+
+    def ensure_provider_ready(self) -> bool:
+        """
+        Prepare provider resources required before recording.
+
+        For local Whisper, start model download in background when the selected
+        checkpoint is not cached yet. Recording is blocked until preparation
+        finishes so the first captured audio is not held while the model downloads.
+
+        :return: True if recording can start, False otherwise
+        """
+        provider = self.get_provider()
+        if provider.id != "openai_whisper_local":
+            return True
+
+        if not provider.is_configured():
+            self.window.controller.packages.install(
+                ["openai-whisper"], callback=self._whisper_packages_installed,
+            )
+            return False
+
+        # openai-whisper invokes the external ffmpeg executable from
+        # whisper/audio.py. On Windows, fail early with a useful message instead
+        # of allowing subprocess.Popen to surface an opaque [WinError 2] later.
+        if not provider.is_ffmpeg_available():
+            self.window.ui.dialogs.alert(provider.get_ffmpeg_message())
+            return False
+
+        model_name = provider.get_model_name()
+        if self.provider_preparing:
+            msg = trans('audio.whisper.model.downloading').format(model=model_name)
+            self.set_status(msg)
+            self.window.update_status(msg)
+            return False
+
+        if provider.is_model_downloaded():
+            return True
+
+        self.provider_preparing = True
+        msg = trans('audio.whisper.model.downloading').format(model=model_name)
+        self.set_status(msg)
+        self.window.update_status(msg)
+
+        from .worker import Worker
+        worker = Worker()
+        worker.from_defaults(self)
+        worker.prepare_model = True
+        worker.prepare_provider = provider
+        worker.prepare_model_name = model_name
+        worker.signals.model_ready.connect(self.handle_provider_ready)
+        worker.signals.model_prepare_failed.connect(self.handle_provider_prepare_failed)
+        worker.run_async()
+        return False
+
+    @Slot(str)
+    def handle_provider_ready(self, model_name: str):
+        """Handle local Whisper model download/load completion."""
+        self.provider_preparing = False
+        msg = trans('audio.whisper.model.ready').format(model=model_name)
+        self.set_status(msg)
+        self.window.update_status(msg)
+
+    @Slot(str)
+    def handle_provider_prepare_failed(self, error: str):
+        """Handle local Whisper model preparation failure."""
+        self.provider_preparing = False
+        msg = trans('audio.whisper.model.download_failed').format(error=error)
+        self.set_status(msg)
+        self.window.update_status(msg)
 
     def toggle_recording_simple(
             self,
@@ -161,6 +264,20 @@ class Plugin(BasePlugin):
         """
         if not self.is_advanced():
             return
+
+        if state:
+            try:
+                if not self.ensure_provider_ready():
+                    self.speech_enabled = False
+                    self.listening = False
+                    self.window.ui.plugin_addon['audio.input'].btn_toggle.setChecked(False)
+                    return
+            except Exception as e:
+                self.speech_enabled = False
+                self.listening = False
+                self.window.ui.plugin_addon['audio.input'].btn_toggle.setChecked(False)
+                self.error(e)
+                return
 
         self.speech_enabled = state
         self.window.ui.plugin_addon['audio.input'].btn_toggle.setChecked(state)
@@ -233,7 +350,7 @@ class Plugin(BasePlugin):
             self.toggle_speech(data['value'])
 
         elif name == Event.AUDIO_INPUT_RECORD_TOGGLE:
-            state = data['state'] if 'value' in data else None
+            state = data['state'] if 'state' in data else None
             auto = data['auto'] if 'auto' in data else False
             self.toggle_recording_simple(state=state, auto=auto)
 
@@ -246,6 +363,11 @@ class Plugin(BasePlugin):
         elif name == Event.PLUGIN_OPTION_GET:
             if "name" in data and data["name"] == "audio.input.advanced":
                 data["value"] = self.is_advanced()
+
+        elif name == Event.PLUGIN_SETTINGS_CHANGED:
+            provider = self.get_providers().get("openai_whisper_local")
+            if provider is not None and hasattr(provider, "apply_memory_policy"):
+                provider.apply_memory_policy()
 
     def on_ctx_begin(self, ctx: CtxItem):
         """
@@ -323,6 +445,7 @@ class Plugin(BasePlugin):
         :param path: audio file path
         """
         try:
+            from .worker import Worker
             worker = Worker()
             worker.from_defaults(self)
             worker.path = path
@@ -349,14 +472,17 @@ class Plugin(BasePlugin):
         if self.thread_started and not force:
             return
 
+        loader_token = None
         try:
+            from .worker import Worker
             worker = Worker()
             worker.from_defaults(self)
-            worker.path = os.path.join(
-                self.window.core.config.path,
-                self.input_file,
-            )
+            worker.path = self.get_input_path()
             worker.advanced = self.is_advanced()  # advanced mode
+            if not worker.advanced:
+                loader_token = self._begin_transcription_loader()
+                worker.transcription_loader_token = loader_token
+                worker.signals.capture_finished.connect(self._finish_transcription_loader)
 
             # signals
             worker.signals.transcribed.connect(self.handle_transcribed)
@@ -369,7 +495,40 @@ class Plugin(BasePlugin):
             worker.run_async()
 
         except Exception as e:
+            self._finish_transcription_loader(loader_token)
             self.error(e)
+
+    def _begin_transcription_loader(self):
+        """Show a chat-scoped loader while recorded speech is transcribed."""
+        if (self.window.controller.realtime.is_enabled()
+                or self.window.controller.tabs.get_current_type() != Tab.TAB_CHAT
+                or self.window.core.ctx.output.has_request()):
+            return None
+        meta = self.window.core.ctx.get_current_meta()
+        if meta is None:
+            return None
+        token = object()
+        self._transcription_loaders[token] = meta
+        self.window.dispatch(RenderEvent(RenderEvent.STATE_BUSY, {
+            "meta": meta,
+            "loading_delay_ms": 0,
+            "loading_wait_for_input": False,
+        }))
+        return token
+
+    @Slot(object)
+    def _finish_transcription_loader(self, token):
+        """Clear this loader unless another transcription or reply now owns it."""
+        meta = self._transcription_loaders.pop(token, None)
+        if meta is None:
+            return
+        if any(other.id == meta.id for other in self._transcription_loaders.values()):
+            return
+        output = self.window.core.ctx.output
+        request_meta = output.get_request_meta() if output.has_request() else None
+        if request_meta is not None and request_meta.id == meta.id:
+            return  # The generated reply keeps the same loader until first output.
+        self.window.dispatch(RenderEvent(RenderEvent.STATE_IDLE, {"meta": meta}))
 
     def can_listen(self) -> bool:
         """
@@ -477,9 +636,9 @@ class Plugin(BasePlugin):
         # send text
         if self.get_option_value('auto_send'):
             # to: notepad
-            if self.window.controller.notepad.is_active():
-                idx = self.window.controller.notepad.get_current_active()
-                self.window.controller.notepad.append_text(text, idx)
+            if self.window.tools.get("notepad").tabs.is_active():
+                idx = self.window.tools.get("notepad").tabs.current()
+                self.window.tools.get("notepad").documents.append(text, idx)
                 self.set_status('')
 
                 data = {}
@@ -487,8 +646,8 @@ class Plugin(BasePlugin):
                 self.window.dispatch(event)  # clear here
 
             # to: calendar
-            elif self.window.controller.calendar.is_active():
-                self.window.controller.calendar.note.append_text(text)
+            elif self.window.tools.get("calendar").is_active():
+                self.window.tools.get("calendar").resolve_surface(create=True).note.append_text(text)
                 self.set_status('')
 
                 data = {}
@@ -499,18 +658,14 @@ class Plugin(BasePlugin):
             else:
                 self.set_status('...')
                 self.window.update_status(trans('audio.speak.sending'))
-                prefix = ""
-                if self.window.controller.agent.legacy.enabled():
-                    prefix = "user: "
 
-                context = BridgeContext()
-                context.prompt = prefix + text
-                extra = {}
-                event = KernelEvent(KernelEvent.INPUT_SYSTEM, {
-                    'context': context,
-                    'extra': extra,
-                })
-                self.window.dispatch(event)  # send text, input clear in send method
+                # Voice input is user input. Route the transcript through the same
+                # composer pipeline as Send/Enter instead of the legacy
+                # INPUT_SYSTEM shortcut. The normal path owns request/chat pinning,
+                # USER_SEND hooks, preprocessing, SEND_INIT and kernel resume after
+                # a previous STOP. The transcript is already in the input widget,
+                # so send_input() can serialize and submit it exactly like typed text.
+                self.window.controller.chat.input.send_input()
                 self.set_status('')
 
     def handle_realtime_stopped(self):

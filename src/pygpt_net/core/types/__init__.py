@@ -10,10 +10,13 @@
 # ================================================== #
 
 from .agent import *
+from .audio import *
 from .base import *
+from .canvas import *
 from .image import *
 from .mode import *
 from .model import *
 from .openai import *
 from .multimodal import *
 from .tools import *
+from .theme import *

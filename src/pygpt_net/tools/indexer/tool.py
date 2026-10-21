@@ -17,7 +17,7 @@ from PySide6.QtCore import Slot
 from PySide6.QtGui import QAction, QIcon, QTextCursor
 from sqlalchemy import text
 
-from pygpt_net.tools.base import BaseTool
+from pygpt_net.tools.base import BaseTool, ToolMenuAction
 from pygpt_net.utils import trans
 
 from .ui.dialogs import DialogBuilder
@@ -32,6 +32,12 @@ class IndexerTool(BaseTool):
         """
         super(IndexerTool, self).__init__(*args, **kwargs)
         self.id = "indexer"  # unique tool id
+        self.allow_tab = False
+        self.allow_dialog = True
+        self.multi_tab = True
+        self.multi_dialog = False
+        self.on_menu_click = ToolMenuAction.ALWAYS_DIALOG
+        self.dialog_id = 'tool.indexer'
         self.dialog = None
         self.opened = False
         self.current_idx = "base"
@@ -54,6 +60,8 @@ class IndexerTool(BaseTool):
 
     def open(self):
         """Open dialog window"""
+        if not self.can_open_dialog():
+            return None
         self.window.ui.dialogs.open('tool.indexer', width=800, height=600)
         self.opened = True
         self.refresh()
@@ -187,11 +195,16 @@ class IndexerTool(BaseTool):
                     datetime.datetime.fromtimestamp(row["updated_ts"]).strftime('%Y-%m-%d %H:%M:%S'))
         self.window.ui.nodes['tool.indexer.ctx.last_meta_ts'].setText(last_meta_ts)
 
-        # auto-index enabled
+        # auto-index policy
+        auto_policy = self.window.core.config.get("llama.idx.auto", "off")
+        if isinstance(auto_policy, bool):
+            auto_policy = "all" if auto_policy else "off"
         auto_str = trans("tool.indexer.tab.ctx.auto.no")
-        if self.window.core.config.get("llama.idx.auto"):
-            auto_str = trans("tool.indexer.tab.ctx.auto.yes") + " ({})".format(
-                self.window.core.config.get("llama.idx.auto.index"))
+        if auto_policy in ("all", "projects"):
+            policy_label = trans(
+                "settings.llama.extra.btn.idx_auto.mode." + auto_policy
+            )
+            auto_str = trans("tool.indexer.tab.ctx.auto.yes") + f" ({policy_label})"
         self.window.ui.nodes['tool.indexer.ctx.auto_enabled'].setText(auto_str)
 
         # last auto-index TS
@@ -369,6 +382,7 @@ class IndexerTool(BaseTool):
             return
 
         table = self.window.ui.nodes['tool.indexer.browser'].get_current_table()
+        doc_id = None
         query = "SELECT doc_id FROM {} WHERE id=:id".format(table)
         stmt = text(query).bindparams(id=id)
         with self.window.core.db.get_db().connect() as conn:
@@ -497,7 +511,7 @@ class IndexerTool(BaseTool):
             checkable=False,
         )
         actions["indexer"].triggered.connect(
-            lambda: self.toggle()
+            self.on_menu_action
         )
         return actions
 

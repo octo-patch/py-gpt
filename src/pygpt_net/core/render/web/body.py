@@ -6,21 +6,25 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.03 17:00:00                  #
+# Updated Date: 2026.08.16 20:10:00                  #
 # ================================================== #
 
 import os
 from json import dumps as _json_dumps
 from random import shuffle as _shuffle
+from pygpt_net.item.render_attachment import attachment_type, attachment_paths
+from PySide6.QtCore import QFile, QUrl
+import pygpt_net.icons_rc
 
 from typing import Optional, List, Dict, Tuple
 
-from pygpt_net.core.text.utils import elide_filename
 from pygpt_net.core.events import Event
+from pygpt_net.core.types import MODE_AGENT_V2
 from pygpt_net.item.ctx import CtxItem
 from pygpt_net.utils import trans
 
 from .syntax_highlight import SyntaxHighlight
+from .scripts import development_script_tags
 
 import pygpt_net.js_rc
 import pygpt_net.css_rc
@@ -30,6 +34,18 @@ import pygpt_net.fonts_rc
 class Body:
 
     NUM_TIPS = 13
+    EXTRA_ITEMS_VISIBLE_LIMIT = 5
+
+    # User input auto-collapse threshold and collapsed max height (pixels).
+    # Set to 0 to disable automatic collapsing.
+    USER_MSG_COLLAPSE_HEIGHT_PX = 230
+
+    # Live provider reasoning UI timing (milliseconds).
+    # Delay starts on the first normal response token after a thinking block.
+    # Set REASONING_FADE_OUT_DELAY_MS to 0 to start hiding immediately.
+    # Set REASONING_FADE_DURATION_MS to 0 to disable the fade animation.
+    REASONING_FADE_OUT_DELAY_MS = 0
+    REASONING_FADE_DURATION_MS = 180
 
     _HTML_P0 = """
             <!DOCTYPE html>
@@ -73,30 +89,8 @@ class Body:
                     """
 
     _HTML_P6_DEV = """
-                </script>     
-                <script type="text/javascript" src="qrc:///js/app-async.js"></script>       
-                <script type="text/javascript" src="qrc:///js/app-bridge.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-common.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-config.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-custom.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-data.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-dom.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-events.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-highlight.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-logger.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-markdown.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-math.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-nodes.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-raf.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-scroll.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-stream.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-queue.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-template.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-tool.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-ui.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-user.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-utils.js"></script>
-                <script type="text/javascript" src="qrc:///js/app-runtime.js"></script>
+                </script>
+""" + development_script_tags() + """
             </head>
             <body """
 
@@ -107,7 +101,7 @@ class Body:
                 <body """
 
     _HTML_P7 = """>
-            <div id="container">
+            <div id="container" class="chat-container">
                 <div id="_nodes_" class="nodes empty_list"></div>
                 <div id="_append_input_" class="append_input"></div>
                 <div id="_append_output_before_" class="append_output"></div>
@@ -119,6 +113,7 @@ class Body:
                 </div>
                 <div id="tips" class="tips"></div>
             </div>
+            <div class="chat-bottom-fade" aria-hidden="true"></div>
             <button id="scrollFab" class="scroll-fab" type="button" title="Go to top" aria-label="Go to top">
                 <img id="scrollFabIcon" src="" alt="Scroll">
             </button>
@@ -174,8 +169,9 @@ class Body:
     _SCROLL_FAB_CSS = """
         #scrollFab.scroll-fab {
             position: fixed;
-            right: 16px;
-            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            bottom: 0px;
             width: 40px;
             height: 40px;
             border: none;
@@ -214,21 +210,57 @@ class Body:
         }
     """
 
+    # Keep interaction states in their own stylesheet: profile CSS must not
+    # swallow these rules through an unclosed block or override their visibility.
+    # Keep hover separate so unsupported focus selectors cannot invalidate it.
+    _USER_ACTIONS_CSS = """
+        #container .msg-user-region:hover > .user-message-actions,
+        #container .msg-user-region.user-actions-visible > .user-message-actions {
+            opacity: 1 !important;
+            visibility: visible !important;
+            pointer-events: auto !important;
+        }
+        #container .msg-user-region:focus-within > .user-message-actions {
+            opacity: 1 !important;
+            visibility: visible !important;
+            pointer-events: auto !important;
+        }
+        """
+
     _PERFORMANCE_CSS = """
         #container, #_nodes_, #_append_output_, #_append_output_before_ {
-            contain: layout paint;
+            /* Qt WebEngine can rasterize nested contained/GPU layers with
+               different background shades. Keep chat in the normal layer. */
+            contain: none;
             overscroll-behavior: contain;
-            backface-visibility: hidden;
-            transform: translateZ(0);
+            backface-visibility: visible;
+            transform: none;
+            will-change: auto;
         }
         .msg-bot {
-            contain: layout paint style;
-            contain-intrinsic-size: 1px 600px;
+            contain: none;
             box-shadow: none !important;
             filter: none !important;
         }
-        .msg-bot:not(:last-child) {
+        /* Hybrid history virtualization.
+
+           Only finalized/older message boxes receive .msg-virtualized from JS.
+           Before that happens JS stores the *measured content-box height* in
+           --pygpt-msg-virtual-height. This keeps scrollHeight stable while
+           content-visibility skips expensive off-screen Markdown/code DOM.
+
+           Current/recent messages never receive the class, so the live stream
+           always uses real layout and remains compatible with exact-bottom
+           auto-follow. */
+        .msg-bot.msg-virtualized {
             content-visibility: auto;
+            contain-intrinsic-block-size: auto var(--pygpt-msg-virtual-height, 600px);
+        }
+        #_append_output_ .msg-bot,
+        #_append_output_before_ .msg-bot,
+        .msg-bot.msg-live {
+            content-visibility: visible !important;
+            contain-intrinsic-block-size: none !important;
         }
         .msg {
             text-rendering: optimizeSpeed;
@@ -236,11 +268,10 @@ class Body:
         pre > code,
         .hl-tail,
         .hl-frozen {
-            contain: layout paint;
-            content-visibility: auto;
-            backface-visibility: hidden;
-            contain-intrinsic-size: 1px 600px;
-            transform: translateZ(0);
+            /* Keep highlighted code in the normal paint layer. Forcing a GPU
+               layer inside a clipped, scrolling grid can leave rectangular
+               background tiles in Qt WebEngine on Windows. */
+            contain: none;
             filter: none !important;
         }
         """
@@ -255,7 +286,7 @@ class Body:
         self.highlight = SyntaxHighlight(window)
         self._tip_keys = tuple(f"output.tips.{i}" for i in range(1, self.NUM_TIPS + 1))
         self._syntax_dark = (
-            "dracula", "fruity", "github-dark", "gruvbox-dark", "inkpot", "material",
+            "default-dark", "material-darker", "dracula", "fruity", "github-dark", "gruvbox-dark", "inkpot", "material",
             "monokai", "native", "nord", "nord-darker", "one-dark", "paraiso-dark",
             "rrt", "solarized-dark", "stata-dark", "vim", "zenburn",
         )
@@ -266,7 +297,8 @@ class Body:
 
         :return: True if enabled, False otherwise.
         """
-        return self.window.core.config.get('output_timestamp')
+        config = self.window.core.config
+        return bool(config.get('render.plain') and config.get('output_timestamp'))
 
     def prepare_styles(self) -> str:
         """
@@ -276,7 +308,7 @@ class Body:
         """
         cfg = self.window.core.config
         fonts_path = os.path.join(cfg.get_app_path(), "data", "fonts").replace("\\", "/")
-        syntax_style = self.window.core.config.get("render.code_syntax") or "default"
+        syntax_style = self.highlight.get_style()
         theme_css = self.window.controller.theme.markdown.get_web_css().replace('%fonts%', fonts_path)
         parts = [
             self._SPINNER,
@@ -284,9 +316,25 @@ class Body:
             theme_css,
             "pre { color: #fff; }" if syntax_style in self._syntax_dark else "pre { color: #000; }",
             self.highlight.get_style_defs(),
-            self._PERFORMANCE_CSS
+            self._PERFORMANCE_CSS,
+            "html, body { background: transparent !important; }",
+            self._bottom_fade_styles(),
         ]
         return "\n".join(parts)
+
+    def _bottom_fade_styles(self) -> str:
+        """Overlay the viewport edge without changing scroll height or hit testing."""
+        return ""
+        rgb = "0, 0, 0"
+        return (
+            ".chat-bottom-fade {position: fixed; left: 50%; bottom: 0;"
+            "width: min(765px, calc(100% - 15px)); margin-left: 7.5px;"
+            "transform: translateX(-50%);"
+            "height: 16px; z-index: 3; pointer-events: none; user-select: none;"
+            f"background: linear-gradient(to top, rgba({rgb}, .18) 0%,"
+            f"rgba({rgb}, .06) 35%, rgba({rgb}, 0) 100%);}}"
+            "body.theme-wide .chat-bottom-fade {width: 100%; margin-left: 0;}"
+        )
 
     def prepare_action_icons(self, ctx: CtxItem) -> str:
         """
@@ -309,6 +357,8 @@ class Body:
         :return: List of HTML strings for icons.
         """
         icons: List[str] = []
+        if CtxItem.uses_agent_timeline(ctx) and getattr(ctx, "current", False):
+            return icons
         if ctx.output:
             cid = ctx.id
             t = trans
@@ -319,45 +369,59 @@ class Body:
             icons.append(
                 f'<a href="extra-replay:{cid}" class="action-icon" data-id="{cid}" role="button"><span class="cmd">{self.get_icon("reload", t("ctx.extra.reply"), ctx)}</span></a>')
             icons.append(
-                f'<a href="extra-edit:{cid}" class="action-icon edit-icon" data-id="{cid}" role="button"><span class="cmd">{self.get_icon("edit", t("ctx.extra.edit"), ctx)}</span></a>')
-            icons.append(
                 f'<a href="extra-delete:{cid}" class="action-icon edit-icon" data-id="{cid}" role="button"><span class="cmd">{self.get_icon("delete", t("ctx.extra.delete"), ctx)}</span></a>')
-            if not self.window.core.ctx.is_first_item(cid):
-                icons.append(
-                    f'<a href="extra-join:{cid}" class="action-icon edit-icon" data-id="{cid}" role="button"><span class="cmd">{self.get_icon("playlist_add", t("ctx.extra.join"), ctx)}</span></a>')
         return icons
 
-    def get_action_icon_data(self, ctx: CtxItem) -> List[Dict]:
+    def get_action_icon_data(
+            self,
+            ctx: CtxItem,
+            edit_replay_id: Optional[int] = None,
+            delete_start_id: Optional[int] = None,
+            delete_end_id: Optional[int] = None
+    ) -> List[Dict]:
         """
         Return raw data for message-level action icons (href/title/icon path).
         This allows JS templates to render actions without Python-side HTML.
+
+        Audio and copy always target the visible response item. Edit/replay may
+        target an earlier user item when the response closes a tool-call chain.
+        Delete may target an exact inclusive range for the same chain.
 
         1. extra-audio-read
         2. extra-copy
         3. extra-replay
         4. extra-edit
-        5. extra-delete
-        6. extra-join (if not the first item)
-        7. (future actions...)
+        5. extra-delete / extra-delete-chain
 
         :param ctx: CtxItem
+        :param edit_replay_id: Optional item ID used by edit/replay actions
+        :param delete_start_id: Optional first item ID for grouped deletion
+        :param delete_end_id: Optional last item ID for grouped deletion
         :return: List of action dicts
         """
         items: List[Dict] = []
+        if CtxItem.uses_agent_timeline(ctx) and getattr(ctx, "current", False):
+            return items
         if ctx.output:
             cid = ctx.id
+            target_id = edit_replay_id if edit_replay_id is not None else cid
             t = trans
             app_path = self.window.core.config.get_app_path()
+
             def icon_path(name: str) -> str:
                 return os.path.join(app_path, "data", "icons", f"{name}.svg").replace("\\", "/")
 
+            delete_href = f"extra-delete:{cid}"
+            if delete_start_id is not None and delete_end_id is not None \
+                    and delete_start_id != delete_end_id:
+                delete_href = f"extra-delete-chain:{delete_start_id},{delete_end_id}"
+
+            # Keep data-id bound to the visible response so hover/highlight still
+            # refers to the footer that the user actually clicked.
             items.append({"href": f"extra-audio-read:{cid}", "title": t("ctx.extra.audio"), "icon": f"file://{icon_path('volume')}", "id": cid})
             items.append({"href": f"extra-copy:{cid}", "title": t("ctx.extra.copy"), "icon": f"file://{icon_path('copy')}", "id": cid})
-            items.append({"href": f"extra-replay:{cid}", "title": t("ctx.extra.reply"), "icon": f"file://{icon_path('reload')}", "id": cid})
-            items.append({"href": f"extra-edit:{cid}", "title": t("ctx.extra.edit"), "icon": f"file://{icon_path('edit')}", "id": cid})
-            items.append({"href": f"extra-delete:{cid}", "title": t("ctx.extra.delete"), "icon": f"file://{icon_path('delete')}", "id": cid})
-            if not self.window.core.ctx.is_first_item(cid):
-                items.append({"href": f"extra-join:{cid}", "title": t("ctx.extra.join"), "icon": f"file://{icon_path('playlist_add')}", "id": cid})
+            items.append({"href": f"extra-replay:{target_id}", "title": t("ctx.extra.reply"), "icon": f"file://{icon_path('reload')}", "id": cid})
+            items.append({"href": delete_href, "title": t("ctx.extra.delete"), "icon": f"file://{icon_path('delete')}", "id": cid})
         return items
 
     def get_icon(
@@ -382,7 +446,8 @@ class Body:
             self,
             url: str,
             num: Optional[int] = None,
-            num_all: Optional[int] = None
+            num_all: Optional[int] = None,
+            ctx: Optional[CtxItem] = None
     ) -> str:
         """
         Get HTML for an image or video link with optional numbering.
@@ -392,26 +457,26 @@ class Body:
         :param num_all: Optional total number of images/videos
         :return: HTML string
         """
-        url, path = self.window.core.filesystem.extract_local_url(url)
+        url, path = self.window.core.filesystem.extract_local_url(url, ctx=ctx)
         basename = os.path.basename(path)
         ext = os.path.splitext(basename)[1].lower()
         video_exts = (".mp4", ".webm", ".ogg", ".mov", ".avi", ".mkv")
         if ext in video_exts:
+            source_url = url
             if ext != ".webm":
                 webm_path = os.path.splitext(path)[0] + ".webm"
                 if os.path.exists(webm_path):
-                    path = webm_path
+                    source_url = self.window.core.filesystem.get_local_url(webm_path, ctx=ctx)
                     ext = ".webm"
             return f'''
             <div class="extra-src-video-box" title="{url}">
                 <video class="video-player" controls>
-                    <source src="{path}" type="video/{ext[1:]}">
+                    <source src="{source_url}" type="video/{ext[1:]}">
                 </video>
-                <p><a href="bridge://play_video/{url}" class="title">{elide_filename(basename)}</a></p>
             </div>
             '''
         url_preview = f"bridge://open_image/{url}"
-        return f'<div class="extra-src-img-box" title="{url}"><div class="img-outer"><div class="img-wrapper"><a href="{url_preview}"><img src="{path}" class="image"></a></div><a href="{url}" class="title">{elide_filename(basename)}</a></div></div><br/>'
+        return f'<div class="extra-src-img-box" title="{url}"><div class="img-outer"><div class="img-wrapper"><a href="{url_preview}"><img src="{url}" class="image"></a></div></div></div><br/>'
 
     def get_url_html(
             self,
@@ -473,7 +538,8 @@ class Body:
             self,
             url: str,
             num: Optional[int] = None,
-            num_all: Optional[int] = None
+            num_all: Optional[int] = None,
+            ctx: Optional[CtxItem] = None
     ) -> str:
         """
         Get HTML for a file link with icon and optional numbering.
@@ -483,12 +549,13 @@ class Body:
         :param num_all: Optional total number of files
         :return: HTML string
         """
-        app_path = self.window.core.config.get_app_path()
-        icon_path = os.path.join(app_path, "data", "icons", "attachments.svg").replace("\\", "/")
-        icon = f'<img src="file://{icon_path}" class="extra-src-icon">'
         num_str = f" [{num}]" if (num is not None and num_all is not None and num_all > 1) else ""
-        url, path = self.window.core.filesystem.extract_local_url(url)
-        return f'{icon} <b>{num_str}</b> <a href="{url}">{path}</a>'
+        url, path = self.window.core.filesystem.extract_local_url(url, ctx=ctx)
+        icon = f'<img src="{self.filetype_icon_url(path)}" class="extra-src-icon" alt="">'
+        name = os.path.basename(path) or path
+        if len(name) > 100:
+            name = name[:97] + "..."
+        return f'{icon} <a href="{url}">{name}</a> <b>{num_str}</b>'
 
     def prepare_tool_extra(self, ctx: CtxItem) -> str:
         """
@@ -501,9 +568,12 @@ class Body:
         if not extra:
             return ""
 
-        parts: List[str] = ['<div class="msg-extra">']
+        parts: List[str] = []
 
         if "plugin" in extra:
+            tool_name = str(extra.get("cmd") or "")
+            if tool_name and self.window.core.command.is_tool_hidden(tool_name):
+                return ""
             event = Event(Event.TOOL_OUTPUT_RENDER, {
                 'tool': extra["plugin"],
                 'html': '',
@@ -517,6 +587,9 @@ class Body:
 
         elif "tool_output" in extra and isinstance(extra["tool_output"], list):
             for tool in extra["tool_output"]:
+                tool_name = str(tool.get("cmd") or "") if isinstance(tool, dict) else ""
+                if tool_name and self.window.core.command.is_tool_hidden(tool_name):
+                    continue
                 if "plugin" not in tool:
                     continue
                 event = Event(Event.TOOL_OUTPUT_RENDER, {
@@ -530,8 +603,9 @@ class Body:
                 if event.data['html']:
                     parts.append(f'<div class="tool-output-block">{event.data["html"]}</div>')
 
-        parts.append("</div>")
-        return "".join(parts)
+        if not parts:
+            return ""
+        return '<div class="msg-extra">{}</div>'.format("".join(parts))
 
     def get_all_tips(self) -> str:
         """
@@ -551,7 +625,7 @@ class Body:
         _shuffle(tips)
         return _json_dumps(tips)
 
-    def _extract_local_url(self, url: str) -> Tuple[str, str]:
+    def _extract_local_url(self, url: str, ctx: Optional[CtxItem] = None) -> Tuple[str, str]:
         """
         Extract local URL and path using filesystem helper.
 
@@ -561,11 +635,62 @@ class Body:
         :return: Tuple of (url, path).
         """
         try:
-            return self.window.core.filesystem.extract_local_url(url)
+            return self.window.core.filesystem.extract_local_url(url, ctx=ctx)
         except Exception:
             return url, url
 
-    def build_extras_dicts(self, ctx: CtxItem, pid: int) -> Tuple[dict, dict, dict, dict]:
+    def get_collapsible_extra_rows_html(self, rows: List[str]) -> str:
+        """
+        Wrap file/URL rows in a collapsible container when their count exceeds
+        EXTRA_ITEMS_VISIBLE_LIMIT.
+
+        A non-positive limit disables collapsing.
+
+        :param rows: Rendered HTML rows.
+        :return: HTML string.
+        """
+        if not rows:
+            return ""
+
+        try:
+            limit = int(self.EXTRA_ITEMS_VISIBLE_LIMIT)
+        except (TypeError, ValueError):
+            limit = 5
+
+        if limit <= 0 or len(rows) <= limit:
+            return f'<div class="extra-items-list">{"<br/>".join(rows)}</div>'
+
+        visible = "<br/>".join(rows[:limit])
+        hidden = "<br/>".join(rows[limit:])
+        remaining = len(rows) - limit
+        label = trans("ctx.extra.more_items").replace("{count}", str(remaining))
+        title = trans("ctx.extra.expand")
+
+        app_path = self.window.core.config.get_app_path()
+        icon_path = os.path.join(app_path, "data", "icons", "expand.svg").replace("\\", "/")
+        arrow = f'<img src="file://{icon_path}" class="extra-items-toggle-arrow" alt="">'
+
+        return (
+            '<div class="extra-items-list">'
+            f'<div class="extra-items-visible">{visible}</div>'
+            f'<div class="extra-items-hidden" style="display:none">{hidden}</div>'
+            '<button type="button" class="extra-items-toggle" '
+            'onclick="toggleExtraItems(this);" '
+            f'title="{title}" aria-expanded="false">'
+            f'<span class="extra-items-toggle-label">{label}</span>{arrow}'
+            '</button>'
+            '</div>'
+        )
+
+    def build_extras_dicts(
+            self,
+            ctx: CtxItem,
+            pid: int,
+            edit_replay_id: Optional[int] = None,
+            delete_start_id: Optional[int] = None,
+            delete_end_id: Optional[int] = None,
+            origin: str = "output",
+    ) -> Tuple[dict, dict, dict, dict]:
         """
         Build images/files/urls raw dicts to be rendered by JS templates.
 
@@ -580,21 +705,35 @@ class Body:
 
         :param ctx: CtxItem
         :param pid: Process ID
+        :param edit_replay_id: Optional item ID used by edit/replay actions
+        :param delete_start_id: Optional first item ID for grouped deletion
+        :param delete_end_id: Optional last item ID for grouped deletion
         :return: Tuple of (images_dict, files_dict, urls_dict, actions_dict)
         """
         images = {}
         files = {}
         urls = {}
 
+        # Agents v2 exposes response artifacts only after the authoritative final
+        # response has finished streaming. FINAL_BEGIN rebuilds the current turn,
+        # so suppress both artifact extras and footer actions while it is active.
+        if origin == "output" and CtxItem.uses_agent_timeline(ctx) and getattr(ctx, "current", False):
+            return images, files, urls, {"actions": []}
+
         # images
         if ctx.images:
             video_exts = (".mp4", ".webm", ".ogg", ".mov", ".avi", ".mkv")
             n = 1
-            for img in ctx.images:
-                if img is None:
+            for img in attachment_paths(ctx.images):
+                if attachment_type(img) != origin:
+                    continue
+                attachments = getattr(self.window.core, "attachments", None)
+                if (attachments is not None
+                        and hasattr(attachments, "is_ctx_excluded_path")
+                        and attachments.is_ctx_excluded_path(img)):
                     continue
                 try:
-                    url, path = self._extract_local_url(img)
+                    url, path = self._extract_local_url(img, ctx=ctx)
                     basename = os.path.basename(path)
                     ext = os.path.splitext(basename)[1].lower()
                     is_video = ext in video_exts
@@ -602,11 +741,15 @@ class Body:
                     if is_video and ext != ".webm":
                         wp = os.path.splitext(path)[0] + ".webm"
                         if os.path.exists(wp):
-                            webm_path = wp
+                            webm_path = self.window.core.filesystem.get_local_url(wp, ctx=ctx)
                     images[str(n)] = {
                         "url": url,
-                        "path": path,
+                        # Browser-facing media sources must be file:// URLs, not
+                        # native paths such as C:\\Users\\... .  Chromium/QWebEngine
+                        # does not treat a raw Windows path as a valid media URL.
+                        "path": url,
                         "basename": basename,
+                        "type": attachment_type(img),
                         "ext": ext,
                         "is_video": is_video,
                         "webm_path": webm_path,
@@ -618,16 +761,24 @@ class Body:
         # files
         if ctx.files:
             n = 1
-            for f in ctx.files:
+            for f in attachment_paths(ctx.files):
+                if attachment_type(f) != origin:
+                    continue
                 try:
-                    url, path = self._extract_local_url(f)
+                    url, path = self._extract_local_url(f, ctx=ctx)
                     files[str(n)] = {
                         "url": url,
                         "path": path,
+                        "basename": os.path.basename(path) or path,
+                        "type": attachment_type(f),
+                        "icon_url": self.filetype_icon_url(path),
                     }
                     n += 1
                 except Exception:
                     pass
+
+        if origin == "user":
+            return images, files, urls, {"actions": []}
 
         # urls
         if ctx.urls:
@@ -640,9 +791,20 @@ class Body:
                     pass
 
         # actions (message-level) – raw data for icons (href/title/icon)
-        actions = self.get_action_icon_data(ctx)
+        actions = self.get_action_icon_data(
+            ctx,
+            edit_replay_id=edit_replay_id,
+            delete_start_id=delete_start_id,
+            delete_end_id=delete_end_id,
+        )
 
         return images, files, urls, {"actions": actions}
+
+    def filetype_icon_url(self, path: str) -> str:
+        """Resolve the packaged extension icon, with a generic fallback."""
+        extension = os.path.splitext(path)[1].lower().lstrip(".")
+        icon = extension if extension and QFile.exists(f":/filetypes/{extension}.svg") else "default"
+        return f"qrc:///filetypes/{icon}.svg"
 
     def normalize_docs(self, doc_ids) -> list[dict]:
         """
@@ -695,7 +857,7 @@ class Body:
         :return: Full HTML string.
         """
         cfg_get = self.window.core.config.get
-        style = cfg_get("theme.style", "blocks")
+        style = cfg_get("theme.style", "standard")
         classes = ["theme-" + style]
         if cfg_get('render.blocks'):
             classes.append("display-blocks")
@@ -716,23 +878,25 @@ class Body:
         run_path = os.path.join(app_path, "data", "icons", "play.svg").replace("\\", "/")
         menu_path = os.path.join(app_path, "data", "icons", "menu.svg").replace("\\", "/")
 
-        url_path = os.path.join(app_path, "data", "icons", "url.svg").replace("\\", "/")
+        url_path = os.path.join(app_path, "data", "icons", "language.svg").replace("\\", "/")
         attach_path = os.path.join(app_path, "data", "icons", "attachments.svg").replace("\\", "/")
         db_path = os.path.join(app_path, "data", "icons", "db.svg").replace("\\", "/")
-
         done_path = os.path.join(app_path, "data", "icons", "done.svg").replace("\\", "/")
 
-        icons_js = (
-            f'window.ICON_EXPAND="file://{expand_path}";'
-            f'window.ICON_COLLAPSE="file://{collapse_path}";'
-            f'window.ICON_CODE_COPY="file://{copy_path}";'
-            f'window.ICON_CODE_PREVIEW="file://{preview_path}";'
-            f'window.ICON_CODE_RUN="file://{run_path}";'
-            f'window.ICON_CODE_MENU="file://{menu_path}";'
-            f'window.ICON_URL="file://{url_path}";'
-            f'window.ICON_ATTACHMENTS="file://{attach_path}";'
-            f'window.ICON_DB="file://{db_path}";'
-            f'window.ICON_DONE="file://{done_path}";'
+        icons_js = "".join(
+            f'window.ICON_{name}={_json_dumps(QUrl.fromLocalFile(path).toString())};'
+            for name, path in (
+                ("EXPAND", expand_path),
+                ("COLLAPSE", collapse_path),
+                ("CODE_COPY", copy_path),
+                ("CODE_PREVIEW", preview_path),
+                ("CODE_RUN", run_path),
+                ("CODE_MENU", menu_path),
+                ("URL", url_path),
+                ("ATTACHMENTS", attach_path),
+                ("DB", db_path),
+                ("DONE", done_path),
+            )
         )
 
         t_copy = trans('ctx.extra.copy_code')
@@ -741,19 +905,42 @@ class Body:
         t_copied = trans('ctx.extra.copied')
         t_preview = trans('ctx.extra.preview')
         t_run = trans('ctx.extra.run')
+        t_more_items = trans("ctx.extra.more_items")
+        t_less = trans("ctx.list.less")
         t_doc_prefix = trans("chat.prefix.doc")
+        t_tool = trans("ctx.tool.label")
+        t_tools = trans("ctx.tool.group.label")
+        t_tool_more = trans("ctx.tool.group.more")
+        t_tool_request = trans("ctx.tool.request")
+        t_tool_response = trans("ctx.tool.response")
 
         locales_js = (
             f'window.LOCALE_COPY={_json_dumps(t_copy)};'
             f'window.LOCALE_COPIED={_json_dumps(t_copied)};'
             f'window.LOCALE_PREVIEW={_json_dumps(t_preview)};'
             f'window.LOCALE_RUN={_json_dumps(t_run)};'
+            f'window.LOCALE_MORE_ITEMS={_json_dumps(t_more_items)};'
+            f'window.LOCALE_LESS={_json_dumps(t_less)};'
             f'window.LOCALE_COLLAPSE={_json_dumps(t_collapse)};'
             f'window.LOCALE_EXPAND={_json_dumps(t_expand)};'
             f'window.LOCALE_DOC_PREFIX={_json_dumps(t_doc_prefix)};'
+            f'window.LOCALE_TOOL={_json_dumps(t_tool)};'
+            f'window.LOCALE_TOOLS={_json_dumps(t_tools)};'
+            f'window.LOCALE_TOOL_MORE={_json_dumps(t_tool_more)};'
+            f'window.LOCALE_TOOL_REQUEST={_json_dumps(t_tool_request)};'
+            f'window.LOCALE_TOOL_RESPONSE={_json_dumps(t_tool_response)};'
+            f'window.LOCALE_TOOL_VIEW_PLAIN={_json_dumps(trans("ctx.tool.view.plain"))};'
+            f'window.LOCALE_TOOL_VIEW_RAW={_json_dumps(trans("ctx.tool.view.raw"))};'
         )
 
-        syntax_style = cfg_get("render.code_syntax") or "default"
+        syntax_style = self.highlight.get_style()
+        try:
+            user_msg_collapse_height = max(0, int(cfg_get(
+                "render.msg.user.collapse.px",
+                self.USER_MSG_COLLAPSE_HEIGHT_PX,
+            )))
+        except (TypeError, ValueError):
+            user_msg_collapse_height = self.USER_MSG_COLLAPSE_HEIGHT_PX
         style_js = (
             f'window.CODE_SYNTAX_STYLE={_json_dumps(syntax_style)};'
             f'window.PROFILE_CODE_HL_N_LINE={int(cfg_get("render.code_syntax.stream_n_line", 25))};'
@@ -762,7 +949,13 @@ class Body:
             f'window.PROFILE_CODE_FINAL_HL_MAX_LINES={int(cfg_get("render.code_syntax.final_max_lines", 1500))};'
             f'window.PROFILE_CODE_FINAL_HL_MAX_CHARS={int(cfg_get("render.code_syntax.final_max_chars", 350000))};'
             f'window.DISABLE_SYNTAX_HIGHLIGHT={int(cfg_get("render.code_syntax.disabled", 0))};'
-            f'window.USER_MSG_COLLAPSE_HEIGHT_PX={int(cfg_get("render.msg.user.collapse.px", 1500))};'
+            f'window.USER_MSG_COLLAPSE_HEIGHT_PX={user_msg_collapse_height};'
+            f'document.documentElement.style.setProperty("--user-msg-collapse-max-h", "{user_msg_collapse_height}px");'
+            f'window.EXTRA_ITEMS_VISIBLE_LIMIT={int(self.EXTRA_ITEMS_VISIBLE_LIMIT)};'
+            f'window.REASONING_SHOW_REALTIME={_json_dumps(bool(cfg_get("ctx.reasoning.show_realtime", False)))};'
+            f'window.REASONING_HIDE_AFTER_RESPONSE={_json_dumps(bool(cfg_get("ctx.reasoning.hide_after_response", True)))};'
+            f'window.REASONING_FADE_OUT_DELAY_MS={int(self.REASONING_FADE_OUT_DELAY_MS)};'
+            f'window.REASONING_FADE_DURATION_MS={int(self.REASONING_FADE_DURATION_MS)};'
         )
 
         tips_js = f'window.TIPS={tips_json};'
@@ -771,6 +964,8 @@ class Body:
         return ''.join((
             self._HTML_P0,
             styles_css,
+            '</style><style id="user-action-style">',
+            self._USER_ACTIONS_CSS,
             self._HTML_P1,
             str(pid),
             self._HTML_P2,

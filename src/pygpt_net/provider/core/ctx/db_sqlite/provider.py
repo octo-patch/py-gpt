@@ -15,6 +15,8 @@ from uuid import uuid4
 from packaging.version import Version
 
 from pygpt_net.item.ctx import CtxMeta, CtxItem, CtxGroup
+from pygpt_net.item.ctx_part import CtxItemPart
+from pygpt_net.item.ctx_part_task import CtxItemPartTask
 from .patch import Patch
 from .storage import Storage
 from pygpt_net.provider.core.ctx.base import BaseProvider
@@ -104,6 +106,19 @@ class DbSqliteProvider(BaseProvider):
             order_direction=order_direction,
             limit=param_limit,
             offset=offset,
+            filters=filters,
+            search_content=search_content,
+        )
+
+    def count_meta(
+            self,
+            search_string: Optional[str] = None,
+            filters: Optional[dict] = None,
+            search_content: bool = False,
+    ) -> int:
+        """Return number of context metadata rows matching search/filters."""
+        return self.storage.count_meta(
+            search_string=search_string,
             filters=filters,
             search_content=search_content,
         )
@@ -220,6 +235,18 @@ class DbSqliteProvider(BaseProvider):
         """
         self.storage.update_meta_ts(item.meta_id)
         return self.storage.update_item(item) is not None
+
+    def append_part(self, part: CtxItemPart) -> bool:
+        return self.storage.insert_part(part) is not None
+
+    def update_part(self, part: CtxItemPart) -> bool:
+        return self.storage.update_part(part)
+
+    def append_part_task(self, task: CtxItemPartTask) -> bool:
+        return self.storage.insert_part_task(task) is not None
+
+    def update_part_task(self, task: CtxItemPartTask) -> bool:
+        return self.storage.update_part_task(task)
 
     def save(self, id: int, meta: CtxMeta, items: List[CtxItem]) -> bool:
         """

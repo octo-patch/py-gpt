@@ -37,10 +37,33 @@ class UrlDialog(QDialog):
         self.initialized = False
         self.params_scroll = None
 
-    def init(self):
+    def init(self, rebuild=False):
         """Initialize dialog"""
-        if self.initialized:
+        if self.initialized and not rebuild:
             return
+        saved = {}
+        selected = self.window.core.config.get('llama.hub.loaders.selected.attachment', 'webpage')
+        if self.initialized:
+            selected = self.window.ui.nodes['dialog.url.loader'].get_value()
+            for key, node in list(self.window.ui.nodes.items()):
+                if key.startswith(('dialog.url.loader.option.', 'dialog.url.loader.config.')):
+                    saved[key] = node.text()
+                    del self.window.ui.nodes[key]
+            # Delete the old layout synchronously before installing another;
+            # deferred deletion leaves Qt using the previous layout meanwhile.
+            from shiboken6 import delete
+            def clear(layout):
+                while layout.count():
+                    item = layout.takeAt(0)
+                    if item.widget() is not None:
+                        item.widget().hide()
+                        item.widget().deleteLater()
+                    elif item.layout() is not None:
+                        clear(item.layout())
+            old_layout = self.layout()
+            clear(old_layout)
+            delete(old_layout)
+            self.initialized = False
 
         self.window.ui.nodes['dialog.url.btn.update'] = QPushButton(trans('dialog.url.update'))
         self.window.ui.nodes['dialog.url.btn.update'].clicked.connect(
@@ -163,11 +186,19 @@ class UrlDialog(QDialog):
         layout.addLayout(bottom)
 
         # defaults
-        self.window.ui.nodes["dialog.url.loader"].set_value("webpage")
-
         self.setLayout(layout)
-
         self.initialized = True
+        for key, value in saved.items():
+            node = self.window.ui.nodes.get(key)
+            if node is not None:
+                node.setText(value)
+        self.window.ui.nodes['dialog.url.loader'].set_value(selected)
+        self.window.core.config.set('llama.hub.loaders.selected.attachment', selected)
+        self.hook_loader_change(None, selected, None)
+
+    def closeEvent(self, event):
+        self.window.core.idx.ui.loaders.flush()
+        super().closeEvent(event)
 
     def hook_loader_change(self, key, value, caller, *args, **kwargs):
         """
@@ -179,6 +210,8 @@ class UrlDialog(QDialog):
         :param args: Args
         :param kwargs: Kwargs
         """
+        if value:
+            self.window.core.config.set('llama.hub.loaders.selected.attachment', value)
         # hide/show options
         for loader in self.window.ui.nodes["dialog.url.loader.option_group"]:
             self.window.ui.nodes["dialog.url.loader.option_group"][loader].hide()
@@ -203,5 +236,8 @@ class UrlDialog(QDialog):
             self.window.ui.nodes["dialog.url.config.label"].show()
             self.window.ui.nodes["dialog.url.config.help"].show()
 
-        self.params_widget.adjustSize()
+        # Let the resizable scroll area own the form width. adjustSize()
+        # shrinks a hidden form to its size hint when reopening the dialog.
+        self.params_widget.layout().invalidate()
+        self.params_widget.updateGeometry()
         self.params_scroll.update()

@@ -17,7 +17,6 @@ from PySide6.QtCore import QTimer, Slot, QObject
 from PySide6.QtWidgets import QApplication
 
 from pygpt_net.item.ctx import CtxItem
-from pygpt_net.plugin.audio_input.worker import ControlWorker
 from pygpt_net.core.events import ControlEvent, AppEvent
 from pygpt_net.utils import trans
 
@@ -51,6 +50,13 @@ class Voice(QObject):
         self.pending_event = None
         self.play_timer = QTimer(self.window)
         self.play_timer.timeout.connect(self.play_audio)
+
+    def get_input_path(self) -> str:
+        """Return the temporary voice-control audio path."""
+        return os.path.join(
+            self.window.core.config.get_user_dir("tmp"),
+            self.input_file,
+        )
 
     def setup(self):
         """Setup voice control"""
@@ -227,9 +233,6 @@ class Voice(QObject):
                 self.window.core.config.save()
                 return
         try:
-            self.is_recording = True
-            self.switch_btn_stop()
-
             # stop audio output if playing
             self.window.controller.audio.stop_output()
 
@@ -244,17 +247,18 @@ class Voice(QObject):
                     self.timer.timeout.connect(self.stop_timeout)
                     self.timer.start(timeout * 1000)
 
-            if not self.window.core.audio.capture.check_audio_input():
+            # Open capture once, without opening and closing a test stream first.
+            if not self.window.core.audio.capture.start():
                 raise Exception("Audio input not working.")
-                # IMPORTANT!!!!
-                # Stop here if audio input not working!
-                # This prevents the app from freezing when audio input is not working!
-
-            self.window.core.audio.capture.start()  # start recording if audio is OK
+            self.is_recording = True
+            self.switch_btn_stop()
             self.window.update_status(trans('audio.speak.now'))
             self.window.dispatch(AppEvent(AppEvent.VOICE_CONTROL_STARTED))  # app event
         except Exception as e:
             self.is_recording = False
+            if self.timer is not None:
+                self.timer.stop()
+                self.timer = None
             self.window.core.debug.log(e)
             self.window.ui.dialogs.alert(e)
             if self.window.core.platforms.is_snap():
@@ -277,7 +281,7 @@ class Voice(QObject):
             self.timer.stop()
             self.timer = None
         self.switch_btn_start()  # switch button to start
-        path = os.path.join(self.window.core.config.path, self.input_file)
+        path = self.get_input_path()
         self.window.core.audio.capture.set_path(path)
 
         if self.window.core.audio.capture.has_source():
@@ -310,12 +314,10 @@ class Voice(QObject):
 
         try:
             # worker
+            from pygpt_net.plugin.audio_input.worker import ControlWorker
             worker = ControlWorker()
             worker.window = self.window
-            worker.path = os.path.join(
-                self.window.core.config.path,
-                self.input_file,
-            )
+            worker.path = self.get_input_path()
             # signals
             worker.signals.transcribed.connect(self.handle_transcribed)
             worker.signals.finished.connect(self.handle_input)

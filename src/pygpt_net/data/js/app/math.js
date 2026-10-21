@@ -28,6 +28,42 @@ class MathRenderer {
 		const scripts = Array.from(scope.querySelectorAll('script[type^="math/tex"]'));
 		const useToString = (typeof katex.renderToString === 'function');
 
+		// Math placeholders are emitted inside <script type="math/tex">. Script
+		// elements are raw-text nodes, so HTML entities produced by escapeHtml()
+		// are not decoded by the HTML parser. Decode exactly the single escaping
+		// layer added by the placeholder renderer before passing TeX to KaTeX.
+		// A callback replacement is intentional: replacements are not scanned
+		// again, so an original literal "&lt;" remains "&lt;" rather than "<".
+		const decodeEscapedMathText = (raw) => String(raw ?? '').replace(
+			/&(amp|lt|gt);/g,
+			(_match, entity) => entity === 'amp' ? '&' : (entity === 'lt' ? '<' : '>')
+		);
+
+
+		// KaTeX has no character metrics entry for the standard Unicode ≠ glyph
+		// used by our \neq/\ne workaround. Rendering is nevertheless correct;
+		// suppress only this known, harmless KaTeX warning and preserve every
+		// other console warning. KaTeX rendering itself is synchronous, so the
+		// original console.warn is restored immediately after each render call.
+		const renderWithoutNeqMetricsWarning = (fn) => {
+			if (typeof console === 'undefined' || typeof console.warn !== 'function') {
+				return fn();
+			}
+			const originalWarn = console.warn;
+			console.warn = function (...args) {
+				const msg = args.length > 0 ? String(args[0]) : '';
+				if (msg === "No character metrics for '≠' in style 'Main-Regular' and mode 'math'") {
+					return;
+				}
+				return originalWarn.apply(this, args);
+			};
+			try {
+				return fn();
+			} finally {
+				console.warn = originalWarn;
+			}
+		};
+
 		const batchFn = async (script) => {
 			if (!script || !script.isConnected) return;
 			// Only render math in bot messages
@@ -35,7 +71,7 @@ class MathRenderer {
 			const t = script.getAttribute('type') || '';
 			const displayMode = t.indexOf('mode=display') > -1;
 			// avoid innerText (it may trigger layout). textContent is sufficient here.
-			const mathContent = script.textContent || '';
+			const mathContent = decodeEscapedMathText(script.textContent || '');
 			const parent = script.parentNode;
 			if (!parent) return;
 
@@ -43,10 +79,19 @@ class MathRenderer {
 				if (useToString) {
 					let html = '';
 					try {
-						html = katex.renderToString(mathContent, {
+						html = renderWithoutNeqMetricsWarning(() => katex.renderToString(mathContent, {
 							displayMode,
-							throwOnError: false
-						});
+							throwOnError: false,
+							// KaTeX 0.16.x normally composes \neq from "=" and the
+							// private-use U+E020 overlay glyph. If KaTeX_Main cannot
+							// be loaded by WebEngine, U+E020 becomes a missing-glyph box.
+							// Render the standard Unicode symbol instead while preserving
+							// relation spacing and the original TeX in the MathML annotation.
+							macros: {
+								'\\neq': '\\mathrel{\\char"2260}',
+								'\\ne': '\\mathrel{\\char"2260}'
+							}
+						}));
 					} catch (_) {
 						const fb = displayMode ? `\\[${mathContent}\\]` : `\\(${mathContent}\\)`;
 						html = (displayMode ? `<div>${Utils.escapeHtml(fb)}</div>` : `<span>${Utils.escapeHtml(fb)}</span>`);
@@ -59,10 +104,14 @@ class MathRenderer {
 				} else {
 					const el = document.createElement(displayMode ? 'div' : 'span');
 					try {
-						katex.render(mathContent, el, {
+						renderWithoutNeqMetricsWarning(() => katex.render(mathContent, el, {
 							displayMode,
-							throwOnError: false
-						});
+							throwOnError: false,
+							macros: {
+								'\\neq': '\\mathrel{\\char"2260}',
+								'\\ne': '\\mathrel{\\char"2260}'
+							}
+						}));
 					} catch (_) {
 						el.textContent = (displayMode ? `\\[${mathContent}\\]` : `\\(${mathContent}\\)`);
 					}

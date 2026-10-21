@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ================================================== #
+# This file is a part of PYGPT package               #
+# Website: https://pygpt.net                         #
+# GitHub:  https://github.com/szczyglis-dev/py-gpt   #
+# MIT License                                        #
+# Created By  : Marcin Szczygliński                  #
+# Updated Date: 2026.09.21 15:20:00                  #
+# ================================================== #
+
+import os
+from typing import Dict, List, Optional, Any
+
+from PySide6.QtCore import QSize, Qt, QTimer, Slot
+from PySide6.QtGui import QMovie, QPixmap
+from PySide6.QtWidgets import QLabel
+
+
+class Banner:
+    """Toolbox banner UI wrapper."""
+
+    WIDTH = 200
+    HEIGHT = 36
+
+    def __init__(self, window=None):
+        self.window = window
+        self.layout = None
+        self.widget: Optional["BannerWidget"] = None
+
+    def setup(self, layout):
+        """Attach banner loading to the toolbox without creating a widget yet."""
+        self.layout = layout
+        self.window.core.banners.loaded.connect(self.set_items)
+
+    @Slot(object)
+    def set_items(self, items: List[Dict[str, Any]]):
+        # A banner record without a downloaded image is not displayable. Do not
+        # create the fixed-height widget for such records, otherwise the toolbox
+        # keeps an empty 36 px slot even though no banner is visible.
+        items = [
+            item for item in list(items or [])
+            if self._is_displayable(item)
+        ]
+        if not items:
+            self._remove_widget()
+            return
+
+        if self.widget is None:
+            widget = BannerWidget(
+                width=self.WIDTH,
+                height=self.HEIGHT,
+                parent=self.window,
+            )
+            self.widget = widget
+            self.window.ui.nodes["toolbox.banner"] = widget
+            if self.layout is not None:
+                self.layout.insertWidget(
+                    0,
+                    widget,
+                    0,
+                    Qt.AlignTop | Qt.AlignRight,
+                )
+
+        self.widget.set_items(items)
+
+    @staticmethod
+    def _is_displayable(item: Dict[str, Any]) -> bool:
+        """Return True only when the banner has an image Qt can render."""
+        path = str(item.get("path") or "")
+        if not path or not os.path.isfile(path):
+            return False
+        if path.lower().endswith(".gif"):
+            return QMovie(path).isValid()
+        return not QPixmap(path).isNull()
+
+    def _remove_widget(self):
+        if self.widget is None:
+            self.window.ui.nodes.pop("toolbox.banner", None)
+            return
+
+        self.widget.stop()
+        self.widget.hide()
+        if self.layout is not None:
+            self.layout.removeWidget(self.widget)
+        self.widget.setParent(None)
+        self.window.ui.nodes.pop("toolbox.banner", None)
+        self.widget.deleteLater()
+        self.widget = None
+
+        # Recalculate the toolbox immediately so Mode moves to the top as soon
+        # as the last banner disappears instead of keeping stale layout space.
+        if self.layout is not None:
+            self.layout.invalidate()
+            self.layout.activate()
+
+
+class BannerWidget(QLabel):
+    """Clickable banner label with timed rotation and animated GIF support."""
+
+    def __init__(self, width: int, height: int, parent=None):
+        super().__init__(parent)
+        self.banner_width = width
+        self.banner_height = height
+        self.items: List[Dict[str, Any]] = []
+        self.current_index = 0
+        self.current_url = ""
+        self._movie: Optional[QMovie] = None
+
+        self.setFixedSize(width, height)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("QLabel { background-color: #000000; border: none; }")
+        self.setText("")
+
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self._next)
+
+    @Slot(object)
+    def set_items(self, items: List[Dict[str, Any]]):
+        self.timer.stop()
+        self.items = list(items or [])
+        self.current_index = 0
+
+        if not self.items:
+            self.stop()
+            return
+        self._show_current()
+
+    def _show_current(self):
+        if not self.items:
+            return
+
+        if self.current_index >= len(self.items):
+            self.current_index = 0
+
+        item = self.items[self.current_index]
+        self.current_url = str(item.get("url") or "")
+        self.setToolTip(str(item.get("tooltip") or ""))
+        if self.current_url:
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.unsetCursor()
+
+        self._show_image(item.get("path"))
+
+        try:
+            duration_ms = int(float(item.get("duration", 30)) * 1000)
+        except (TypeError, ValueError):
+            duration_ms = 30000
+        self.timer.start(max(1000, duration_ms))
+
+    def _next(self):
+        if not self.items:
+            return
+        self.current_index = (self.current_index + 1) % len(self.items)
+        self._show_current()
+
+    def stop(self):
+        self.timer.stop()
+        self.current_url = ""
+        self.items = []
+        self.setToolTip("")
+        self.unsetCursor()
+        self._stop_movie()
+        self.clear()
+
+    def _show_image(self, path: Optional[str]):
+        self._stop_movie()
+        self.clear()
+
+        if not path or not os.path.isfile(path):
+            return
+
+        if path.lower().endswith(".gif"):
+            movie = QMovie(path)
+            if movie.isValid():
+                movie.setCacheMode(QMovie.CacheAll)
+                movie.setScaledSize(QSize(self.banner_width, self.banner_height))
+                self._movie = movie
+                self.setMovie(movie)
+                movie.start()
+                return
+
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            return
+        pixmap = pixmap.scaled(
+            self.banner_width,
+            self.banner_height,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.setPixmap(pixmap)
+
+    def _stop_movie(self):
+        if self._movie is not None:
+            self._movie.stop()
+            self._movie.deleteLater()
+            self._movie = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.current_url:
+            import webbrowser
+            webbrowser.open(self.current_url, new=2)
+            event.accept()
+            return
+        super().mousePressEvent(event)

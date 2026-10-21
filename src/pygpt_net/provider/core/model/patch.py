@@ -6,21 +6,11 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.02.06 03:00:00                  #
+# Updated Date: 2026.09.26 13:00:00
 # ================================================== #
 
 from packaging.version import parse as parse_version, Version
 
-from pygpt_net.core.types import (
-    MODE_RESEARCH,
-    MODE_CHAT,
-    MODE_AGENT_OPENAI,
-    MODE_COMPUTER,
-    MODE_EXPERT
-)
-
-# old patches moved here
-from .patches.patch_before_2_6_42 import Patch as PatchBefore2_6_42
 
 class Patch:
     def __init__(self, window=None):
@@ -34,8 +24,6 @@ class Patch:
         :return: True if migrated
         """
         data = self.window.core.models.items
-        base_data = self.window.core.models.get_base()
-        from_base = self.window.core.models.from_base
         updated = False
 
         # get version of models config
@@ -46,162 +34,37 @@ class Patch:
         if old < version:
 
             # --------------------------------------------
-            # previous patches for versions before 2.6.42
-            if old < parse_version("2.6.42"):
-                patcher = PatchBefore2_6_42(self.window)
-                data, updated = patcher.execute(version)
+            # previous patches for versions before 2.8.32
+            if old < parse_version("2.8.32"):
+                # old patches moved here
+                from .patches.patch_before_2_8_32 import Patch as PatchBefore2_8_32
+                patcher = PatchBefore2_8_32(self.window)
+                data, updated, _ = patcher.execute(version)
+            # --------------------------------------------
+            if old < parse_version("2.8.33"):
+                from .patches.patch_before_2_8_33 import Patch as PatchBefore2_8_33
+                patcher = PatchBefore2_8_33(self.window)
+                data, provider_updated, _ = patcher.execute(version)
+                updated = updated or provider_updated
             # --------------------------------------------
 
-            # <  2.6.66 <--- add models
-            if old < parse_version("2.6.66"):
-                print("Migrating models from < 2.6.66...")
-                models_to_add = [
-                    "claude-opus-4-5",
-                    "claude-sonnet-4-5",
-                    "gemini-3-flash-preview",
-                    "gemini-3-pro-image-preview",
-                    "gemini-3-pro-preview",
-                    "gpt-5.2-low",
-                    "gpt-5.2-medium",
-                    "gpt-5.2-high",
-                    "gpt-image-1.5",
-                    "nano-banana-pro-preview",
-                    "sora-2",
-                    "veo-3.1-fast-generate-preview",
-                    "veo-3.1-generate-preview"
-                ]
-                for model in models_to_add:
-                    if model not in data:
-                        base_model = from_base(model)
-                        if base_model:
-                            data[model] = base_model
-                updated = True
+            # New default models introduced in 2.8.38; preserve user edits.
+            if old < parse_version("2.8.38"):
+                for model_id in ("gpt-6.1-sol", "claude-opus-5-5", "grok-4.7"):
+                    if model_id not in data:
+                        model = self.window.core.models.from_base(model_id)
+                        if model is not None:
+                            data[model_id] = model
+                            updated = True
 
-            # <  2.6.67 <--- add missing image input
-            if old < parse_version("2.6.67"):
-                print("Migrating models from < 2.6.67...")
-                models_to_update = [
-                    "claude-opus-4-5",
-                    "claude-sonnet-4-5",
-                    "gemini-3-flash-preview",
-                    "gemini-3-pro-image-preview",
-                    "gemini-3-pro-preview",
-                    "gpt-5.2-low",
-                    "gpt-5.2-medium",
-                    "gpt-5.2-high",
-                    "gpt-image-1.5",
-                    "nano-banana-pro-preview",
-                    "sora-2",
-                    "veo-3.1-fast-generate-preview",
-                    "veo-3.1-generate-preview"
-                ]
-                for model in models_to_update:
-                    if model in data:
-                        m = data[model]
-                        if not m.is_image_input():
-                            m.input.append("image")
-                updated = True
-
-            # <  2.7.5 <--- add: gemini-2.5-computer-use-preview-10-2025
-            if old < parse_version("2.7.5"):
-                print("Migrating models from < 2.7.5...")
-                models_to_add = [
-                    "gemini-2.5-computer-use-preview-10-2025",
-                    "deep-research-pro-preview-12-2025"
-                ]
-                for model in models_to_add:
-                    if model not in data:
-                        base_model = from_base(model)
-                        if base_model:
-                            data[model] = base_model
-                updated = True
-
-            # <  2.7.7 <--- add missing image input
-            if old < parse_version("2.7.7"):
-                print("Migrating models from < 2.7.7...")
-                models_to_add = [
-                    "grok-4-1-fast-non-reasoning",
-                    "grok-4-1-fast-reasoning",
-                    "grok-4-fast-non-reasoning",
-                    "grok-4-fast-reasoning"
-                ]
-                for model in models_to_add:
-                    if model not in data:
-                        base_model = from_base(model)
-                        if base_model:
-                            data[model] = base_model
-
-                models_to_update = [
-                    "grok-4"
-                ]
-                for model in models_to_update:
-                    if model in data:
-                        m = data[model]
-                        if not m.is_image_input():
-                            m.input.append("image")
-                updated = True
-
-            # <  2.7.8 <--- add missing image input
-            if old < parse_version("2.7.8"):
-                print("Migrating models from < 2.7.8...")
-                models_to_update = [
-                    "grok-4"
-                ]
-                for model in models_to_update:
-                    if model in data:
-                        m = data[model]
-                        if not m.is_image_input():
-                            m.input.append("image")
-                updated = True
-
-            # <  2.7.9 <--- add missing audio input
-            if old < parse_version("2.7.9"):
-                print("Migrating models from < 2.7.9...")
-                models_to_update = [
-                    "grok-4",
-                    "grok-4-fast-non-reasoning",
-                    "grok-4-fast-reasoning",
-                    "grok-4-1-fast-non-reasoning",
-                    "grok-4-1-fast-reasoning",
-                ]
-                for model in models_to_update:
-                    if model in data:
-                        m = data[model]
-                        if not m.is_audio_input():
-                            m.input.append("audio")
-                        if not m.is_audio_output():
-                            m.output.append("audio")
-                        if not m.has_mode("audio"):
-                            m.mode.append("audio")
-                models_to_remove = [
-                    "gemini-2.5-flash-preview-native-audio-dialog",
-                ]
-                for model in models_to_remove:
-                    if model in data:
-                        del data[model]
-                models_to_add = [
-                    "gemini-2.5-flash-native-audio-latest",
-                ]
-                for model in models_to_add:
-                    if model not in data:
-                        base_model = from_base(model)
-                        if base_model:
-                            data[model] = base_model
-                updated = True
-
-            # <  2.7.12 <--- add imagine models
-            if old < parse_version("2.7.12"):
-                print("Migrating models from < 2.7.12...")
-                models_to_add = [
-                    "grok-imagine-image",
-                    "grok-imagine-video",
-                ]
-                for model in models_to_add:
-                    if model not in data:
-                        base_model = from_base(model)
-                        if base_model:
-                            data[model] = base_model
-                updated = True
+            # DeepSeek V4.1 Flash is added in 2.9.0 without replacing user models.
+            if old < parse_version("2.9.0") <= version:
+                model_id = "deepseek_api_flash"
+                if model_id not in data:
+                    model = self.window.core.models.from_base(model_id)
+                    if model is not None:
+                        data[model_id] = model
+                        updated = True
 
         # update file
         if updated:

@@ -6,16 +6,19 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.07 05:00:00                  #
+# Updated Date: 2026.10.02 14:00:00                  #
 # ================================================== #
 
 import json
 import re
 import html
 
+from .tool_display import enrich
+
 class Helpers:
 
     _RE_HTML_ANGLE_OR_MATH = re.compile(r'(\\\[.*?\\\])|(<)|(>)', flags=re.DOTALL)
+    _RE_SANDBOX_TOKEN = re.compile(r'\(sandbox:([^)]+)\)', flags=re.IGNORECASE)
     _RE_WORKDIR_TOKEN = re.compile(r'\(%workdir%([^)]+)\)')
     _RE_APPDIR_TOKEN = re.compile(r'\(%appdir%([^)]+)\)')
 
@@ -35,6 +38,15 @@ class Helpers:
         :param window: Window instance
         """
         self.window = window
+
+    def is_tool_hidden(self, name: str) -> bool:
+        """Return True when a tool is excluded from the conversation surface."""
+        if not name:
+            return False
+        try:
+            return bool(self.window.core.command.is_tool_hidden(str(name)))
+        except Exception:
+            return False
 
     def _html_escape_keep_math(self, m: re.Match) -> str:
         """
@@ -71,6 +83,103 @@ class Helpers:
         :return: formatted HTML string
         """
         return f'[!cmd]{html.escape(m.group(1))}[/!cmd]'
+
+    def extract_tool_calls(self, text: str) -> list:
+        """
+        Extract tool calls from <tool>...</tool> tags.
+
+        :param text: Raw assistant output
+        :return: List of dicts with tool name and raw request JSON
+        """
+        if not text or "<tool>" not in text or "</tool>" not in text:
+            return []
+
+        calls = []
+        for match in self._RE_TOOL_TAG.finditer(text):
+            request = match.group(1).strip()
+            name = ""
+            try:
+                data = json.loads(request)
+                if isinstance(data, dict):
+                    if data.get("cmd") is not None:
+                        name = str(data.get("cmd")).strip()
+                    request = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                pass
+            if self.is_tool_hidden(name):
+                continue
+            calls.append(enrich({
+                "name": name or "tool",
+                "request": request,
+            }, self.window))
+        return calls
+
+    def extract_extra_tool_calls(self, tool_calls) -> list:
+        """Normalize persisted API-shaped tool calls for the WebView renderer.
+
+        Agents v2 stores these calls in ``ctx.extra["tool_calls"]`` without
+        injecting <tool> tags into the assistant answer, so they remain display
+        metadata and can never be mistaken for commands to execute again.
+        """
+        if not isinstance(tool_calls, list):
+            return []
+
+        calls = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            if self.is_tool_hidden(name):
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except Exception:
+                    pass
+            request = {
+                "cmd": name,
+                "params": arguments,
+            }
+            item = {
+                "name": name,
+                "call_id": str(tool_call.get("call_id") or tool_call.get("id") or ""),
+                "request": json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str),
+            }
+            # Agents v2 stores each executed response next to its originating call.
+            # Keep the key absent for unfinished/cancelled calls so the frontend can
+            # distinguish "no response yet" from a valid empty response.
+            if "agents_v2_response" in tool_call:
+                response = tool_call.get("agents_v2_response")
+                if isinstance(response, str):
+                    item["response"] = response
+                else:
+                    item["response"] = json.dumps(
+                        response,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+            calls.append(enrich(item, self.window))
+        return calls
+
+    def strip_tool_calls(self, text: str) -> str:
+        """
+        Remove <tool>...</tool> tags from assistant output used for visible markdown.
+
+        Tool requests are rendered separately in the collapsible tool block.
+
+        :param text: Raw assistant output
+        :return: Output without tool call tags
+        """
+        if not text or "<tool>" not in text or "</tool>" not in text:
+            return text
+        return self._RE_TOOL_TAG.sub("", text).strip()
 
     def _repl_think(self, m: re.Match) -> str:
         """
@@ -153,7 +262,7 @@ class Helpers:
 
         return s
 
-    def pre_format_text(self, text: str) -> str:
+    def pre_format_text(self, text: str, ctx=None) -> str:
         """
         Pre-format text
 
@@ -179,14 +288,28 @@ class Helpers:
         s = self.replace_think_tags(s)
         s = self.replace_execute_tags(s)
 
-        # replace workdir token
+        # replace local path tokens with valid, encoded file URLs
+        if "sandbox:" in s.lower():
+            fs = self.window.core.filesystem
+            s = self._RE_SANDBOX_TOKEN.sub(
+                lambda m: f'({fs.get_local_url("sandbox:" + m.group(1), ctx=ctx)})',
+                s,
+            )
+
         if "%workdir%" in s:
-            prefix = self.window.core.filesystem.get_workdir_prefix()
-            s = self._RE_WORKDIR_TOKEN.sub(lambda m, p=prefix: f'({p}{m.group(1)})', s)
+            fs = self.window.core.filesystem
+            s = self._RE_WORKDIR_TOKEN.sub(
+                lambda m: f'({fs.get_local_url("%workdir%" + m.group(1), ctx=ctx)})',
+                s,
+            )
 
         if "%appdir%" in s:
-            prefix = self.window.core.config.get_app_path()
-            s = self._RE_APPDIR_TOKEN.sub(lambda m, p=prefix: f'({p}{m.group(1)})', s)
+            fs = self.window.core.filesystem
+            app_dir = self.window.core.config.get_app_path()
+            s = self._RE_APPDIR_TOKEN.sub(
+                lambda m: f'({fs.get_local_url(app_dir + m.group(1))})',
+                s,
+            )
 
         return s
 
@@ -217,23 +340,81 @@ class Helpers:
             s = f'<div class="cmd">&gt; {s}</div>'
         return s
 
-    def format_cmd_text(self, text: str, indent: bool = False) -> str:
+    def _normalize_json_display_value(self, value, unpack_string: bool = False):
         """
-        Post-format cmd text
+        Recursively normalize JSON values used by tool request/response display.
+
+        Tool responses may be serialized more than once, e.g. an outer result
+        list can contain ``request`` and ``result`` fields that are themselves
+        JSON strings. A single json.loads/json.dumps pass leaves Unicode in
+        those nested strings escaped as ``\\uXXXX``. Only known wrapper fields
+        are unpacked, so a tool's actual text content is never reinterpreted
+        merely because it happens to contain valid JSON.
+
+        :param value: decoded JSON value
+        :param unpack_string: allow this string value to be parsed as JSON
+        :return: normalized display value
+        """
+        if isinstance(value, dict):
+            normalized = {}
+            for key, item in value.items():
+                normalized[key] = self._normalize_json_display_value(
+                    item,
+                    unpack_string=(key in ("request", "result")),
+                )
+            return normalized
+
+        if isinstance(value, list):
+            return [self._normalize_json_display_value(item) for item in value]
+
+        if unpack_string and isinstance(value, str):
+            stripped = value.strip()
+            if len(stripped) >= 2 and (
+                    (stripped.startswith("{") and stripped.endswith("}"))
+                    or (stripped.startswith("[") and stripped.endswith("]"))
+            ):
+                try:
+                    nested = json.loads(stripped)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return value
+                if isinstance(nested, (dict, list)):
+                    return self._normalize_json_display_value(nested)
+
+        return value
+
+    def format_cmd_data(self, text: str, indent: bool = False) -> str:
+        """
+        Format command/tool JSON for plain-text UI display.
+
+        Nested JSON strings are unpacked recursively so escaped Unicode is
+        displayed as real characters.  This method does not HTML-escape the
+        result; callers that inject HTML must escape it separately.
 
         :param text: text to format
-        :param indent: whether to indent text
-        :return: formatted text
+        :param indent: whether to pretty-print JSON
+        :return: plain formatted text
         """
         if not text:
             return ""
-        if not indent:
-            return html.escape(text)
-        else:
-            try:
-                return html.escape(json.dumps(json.loads(text), indent=2))
-            except Exception:
-                return html.escape(text)
+
+        try:
+            data = json.loads(text)
+            data = self._normalize_json_display_value(data)
+            if indent:
+                return json.dumps(data, indent=2, ensure_ascii=False)
+            return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return str(text)
+
+    def format_cmd_text(self, text: str, indent: bool = False) -> str:
+        """
+        Post-format cmd text for HTML output.
+
+        :param text: text to format
+        :param indent: whether to indent text
+        :return: formatted and HTML-escaped text
+        """
+        return html.escape(self.format_cmd_data(text, indent=indent))
 
 
     def format_chunk(self, text: str) -> str:

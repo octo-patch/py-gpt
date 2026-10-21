@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.22 06:00:00                  #
+# Updated Date: 2026.09.23 19:45:00
 # ================================================== #
 
 from PySide6.QtWidgets import QApplication
@@ -33,6 +33,15 @@ class Extra:
         :param item_id: Item id
         """
         self.window.controller.ctx.delete_item(item_id)
+
+    def delete_item_chain(self, start_item_id: int, end_item_id: int):
+        """
+        Delete an exact tool-call chain range.
+
+        :param start_item_id: First item ID in the chain
+        :param end_item_id: Final response item ID in the chain
+        """
+        self.window.controller.ctx.delete_item_chain(start_item_id, end_item_id)
 
     def copy_item(self, item_id: int):
         """
@@ -72,11 +81,18 @@ class Extra:
 
     def preview_code_text(self, value: str):
         """
-        Preview HTML
+        Preview HTML in the persistent Web Browser runtime.
 
         :param value: block text
         """
-        self.window.core.plugins.get("cmd_code_interpreter").handle_html_output(value)
+        browser = self.window.tools.get("web_browser")
+        if browser is None:
+            return
+        workdir = self.window.core.filesystem.get_data_dir()
+        browser.runtime_call(
+            "canvas_set_html",
+            {"html": value, "__workdir": workdir, "__ui": True},
+        )
 
     def run_code_text(self, value: str):
         """
@@ -85,7 +101,7 @@ class Extra:
         :param value: block text
         """
         print("run", value)
-        self.window.core.plugins.get("cmd_code_interpreter").handle_python_run(value)
+        self.window.core.plugins.get("filesystem").handle_python_run(value)
 
     def edit_item(self, item_id: int):
         """
@@ -110,16 +126,18 @@ class Extra:
             self.edit_show()
 
     def edit_show(self):
-        """Show edit buttons"""
-        self.window.ui.nodes['input.send_btn'].setVisible(False)
-        self.window.ui.nodes['input.update_btn'].setVisible(True)
-        self.window.ui.nodes['input.cancel_btn'].setVisible(True)
+        """Show edit buttons inside ChatInput."""
+        input_node = self.window.ui.nodes['input']
+        input_node.set_icon_visible('cancel', True)
+        input_node.set_icon_visible('update', True)
+        self.window.controller.chat.common.sync_send_stop_buttons()
 
     def edit_hide(self):
-        """Hide edit buttons"""
-        self.window.ui.nodes['input.send_btn'].setVisible(True)
-        self.window.ui.nodes['input.update_btn'].setVisible(False)
-        self.window.ui.nodes['input.cancel_btn'].setVisible(False)
+        """Hide edit buttons inside ChatInput."""
+        input_node = self.window.ui.nodes['input']
+        input_node.set_icon_visible('cancel', False)
+        input_node.set_icon_visible('update', False)
+        self.window.controller.chat.common.sync_send_stop_buttons()
 
     def edit_submit(self):
         """Submit edit"""
@@ -221,32 +239,3 @@ class Extra:
                 self.audio_play_id = item_id
             elif self.audio_play_id == item_id:
                 self.window.controller.audio.read_text(item.output)
-
-    def join_item(
-            self,
-            item_id: int,
-            force: bool = False
-    ):
-        """
-        Join ctx items
-
-        :param item_id: ctx item id
-        :param force: Force join
-        """
-        self.window.controller.kernel.resume()
-        if not force:
-            self.window.ui.dialogs.confirm(
-                type='ctx.join_item',
-                id=item_id,
-                msg=trans('ctx.join.item.confirm'),
-            )
-            return
-        prev_item = self.window.core.ctx.get_previous_item(item_id)
-        current_item = self.window.core.ctx.get_item_by_id(item_id)
-        if prev_item is not None and current_item is not None:
-            prev_item.output += "\n\n" + current_item.output
-            if current_item.msg_id is not None:
-                prev_item.msg_id = current_item.msg_id # update msg_id to the latest
-            self.window.core.ctx.update_item(prev_item)
-            self.window.core.ctx.remove_item(current_item.id)
-            self.window.controller.ctx.refresh()

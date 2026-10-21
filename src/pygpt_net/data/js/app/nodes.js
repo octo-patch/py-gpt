@@ -5,13 +5,15 @@
 class NodesManager {
 
 	// Nodes manager for handling message nodes.
-	constructor(dom, renderer, highlighter, math) {
+	constructor(dom, renderer, highlighter, math, toolOutput, templates) {
 		this.dom = dom;
 		this.renderer = renderer;
 		this.highlighter = highlighter;
 		this.math = math;
+		this.toolOutput = toolOutput || null;
+        this.templates = templates || null;
 		// User message collapse manager
-		this._userCollapse = new UserCollapseManager(this.renderer.cfg);
+		this.userCollapse = new UserCollapseManager(this.renderer.cfg);
 	}
 
 	// Check if HTML contains only user messages without any markdown or code features.
@@ -32,7 +34,7 @@ class NodesManager {
 	}
 
 	// Convert user markdown placeholders into plain text nodes.
-	_materializeUserMdAsPlainText(scopeEl) {
+	materializeUserMdAsPlainText(scopeEl) {
 		try {
 			const nodes = scopeEl.querySelectorAll('.msg-box.msg-user [data-md64], .msg-box.msg-user [md-block-markdown]');
 			nodes.forEach(el => {
@@ -64,65 +66,10 @@ class NodesManager {
 	}
 
 	// Ensure user copy icon exists inside each user message (.msg) under root.
-	_ensureUserCopyIcons(root) {
-		try {
-			const scope = root || document;
-			const cfg = (this.renderer && this.renderer.cfg) || {};
-			const I = cfg.ICONS || {};
-			const L = cfg.LOCALE || {};
-			const copyIcon = I.CODE_COPY || '';
-			const copyTitle = L.COPY || 'Copy';
-
-			const list = scope.querySelectorAll('.msg-box.msg-user .msg');
-			for (let i = 0; i < list.length; i++) {
-				const msg = list[i];
-				if (!msg || !msg.isConnected) continue;
-
-				// If exists but sits inside .uc-content, move it up to .msg for stable absolute positioning.
-				const existing = msg.querySelector('.msg-copy-btn');
-				if (existing) {
-					try {
-						const p = existing.parentElement;
-						if (p && p.classList && p.classList.contains('uc-content')) {
-							msg.insertAdjacentElement('afterbegin', existing);
-						}
-					} catch (_) {}
-					continue;
-				}
-
-				const a = document.createElement('a');
-				a.href = 'empty:0';
-				a.className = 'msg-copy-btn';
-				a.setAttribute('role', 'button');
-				a.setAttribute('title', copyTitle);
-				a.setAttribute('aria-label', copyTitle);
-				a.setAttribute('data-tip', copyTitle);
-
-				try {
-					const box = msg.closest('.msg-box.msg-user');
-					if (box && box.id && box.id.startsWith('msg-user-')) {
-						const id = box.id.slice('msg-user-'.length);
-						a.setAttribute('data-id', id);
-					}
-				} catch (_) {}
-
-				const img = document.createElement('img');
-				img.className = 'copy-img';
-				img.src = copyIcon;
-				img.alt = copyTitle;
-
-				a.appendChild(img);
-
-				try {
-					msg.insertAdjacentElement('afterbegin', a);
-				} catch (_) {
-					try {
-						msg.appendChild(a);
-					} catch (__) {}
-				}
-			}
-		} catch (_) {}
-	}
+	ensureUserCopyIcons(root) {
+        // User actions are rendered below the bubble by the message template.
+        for (const button of (root || document).querySelectorAll('.msg-user .msg .msg-copy-btn')) button.remove();
+    }
 
 	// Append HTML/text into the message input container.
 	// If plain text is provided, wrap it into a minimal msg-user box to keep layout consistent.
@@ -131,24 +78,57 @@ class NodesManager {
 		if (!el) return;
 
 		let html = String(content || '');
+		let dateLabel = '';
+        let attachments = null;
+		const inputEnvelopePrefix = '__PYGPT_INPUT_V1__';
+		if (html.startsWith(inputEnvelopePrefix)) {
+			try {
+				const payload = JSON.parse(html.slice(inputEnvelopePrefix.length));
+				html = String((payload && payload.text) || '');
+				dateLabel = String((payload && payload.date_label) || '');
+                attachments = payload && payload.user_attachments;
+			} catch (_) {
+				// Keep backward-compatible plain-text behavior if the envelope is malformed.
+			}
+		}
 		const trimmed = html.trim();
 
 		// If already a full msg-user wrapper, append as-is; otherwise wrap the plain text.
 		const isWrapped = (trimmed.startsWith('<div') && /class=["']msg-box msg-user["']/.test(trimmed));
 		if (!isWrapped) {
 			// Treat incoming payload as plain text (escape + convert newlines to <br>).
-			const safe = (typeof Utils !== 'undefined' && Utils.escapeHtml) ?
-				Utils.escapeHtml(html) :
-				String(html).replace(/[&<>"']/g, m => ({
+			const body = (typeof Utils !== 'undefined' && Utils.renderMentionText) ?
+				Utils.renderMentionText(html) :
+				((typeof Utils !== 'undefined' && Utils.escapeHtml) ?
+					Utils.escapeHtml(html) :
+					String(html).replace(/[&<>"']/g, m => ({
+						'&': '&amp;',
+						'<': '&lt;',
+						'>': '&gt;',
+						'"': '&quot;',
+						"'": '&#039;'
+					} [m])).replace(/\r?\n/g, '<br>'));
+			// Minimal, margin-less user message (no empty msg-extra to avoid extra spacing).
+			html = trimmed ? `<div class="msg-box msg-user"><div class="msg"><p style="margin:0">${body}</p></div></div>` : '';
+		}
+
+        const attachmentHtml = attachments && this.templates
+            ? this.templates.artifacts.renderUserAttachments(attachments) : '';
+        // Durable input has a permanent action row. Reserve its footprint now
+        // as well, so replacing this preview cannot shift the streamed reply.
+        html = `<div class="msg-user-region input-live-arrival">${attachmentHtml}${html}<div class="user-message-actions" aria-hidden="true"></div></div>`;
+
+		if (dateLabel) {
+			const safeDateLabel = (typeof Utils !== 'undefined' && Utils.escapeHtml) ?
+				Utils.escapeHtml(dateLabel) :
+				String(dateLabel).replace(/[&<>"']/g, m => ({
 					'&': '&amp;',
 					'<': '&lt;',
 					'>': '&gt;',
 					'"': '&quot;',
 					"'": '&#039;'
 				} [m]));
-			const body = safe.replace(/\r?\n/g, '<br>');
-			// Minimal, margin-less user message (no empty msg-extra to avoid extra spacing).
-			html = `<div class="msg-box msg-user"><div class="msg"><p style="margin:0">${body}</p></div></div>`;
+			html = `<div class="msg-date-separator input-live-date">${safeDateLabel}</div>${html}`;
 		}
 
 		// Synchronous DOM update.
@@ -156,12 +136,23 @@ class NodesManager {
 
 		// Apply collapse to any user messages in input area (now or later).
 		try {
-			this._userCollapse.apply(el);
+			this.userCollapse.apply(el);
 		} catch (_) {}
 
 		// Ensure copy icons exist (inject or reposition outside uc-content).
 		try {
-			this._ensureUserCopyIcons(el);
+			this.ensureUserCopyIcons(el);
+		} catch (_) {}
+	}
+
+	// Group consecutive tool-only messages after DOM insertion. The grouping engine
+	// uses explicit continuation metadata, so a reload and real-time append follow
+	// exactly the same path.
+	refreshToolGroups(root) {
+		try {
+			if (this.toolOutput && typeof this.toolOutput.groups.groupConsecutive === 'function') {
+				this.toolOutput.groups.groupConsecutive(root);
+			}
 		} catch (_) {}
 	}
 
@@ -179,22 +170,24 @@ class NodesManager {
 		const userOnly = this._isUserOnlyContent(content);
 		if (userOnly) {
 			el.insertAdjacentHTML('beforeend', content);
-			this._materializeUserMdAsPlainText(el);
+			this.materializeUserMdAsPlainText(el);
 			// Collapse before scrolling to ensure final height is used for scroll computations.
 			try {
-				this._userCollapse.apply(el);
+				this.userCollapse.apply(el);
 			} catch (_) {}
 			// Ensure copy icons exist for user messages.
 			try {
-				this._ensureUserCopyIcons(el);
+				this.ensureUserCopyIcons(el);
 			} catch (_) {}
 
 			scrollMgr.scrollToBottom(false);
 			scrollMgr.scheduleScrollFabUpdate();
+			scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 			return;
 		}
 
 		el.insertAdjacentHTML('beforeend', content);
+		this.refreshToolGroups(el);
 
 		try {
 			// Defer post-processing (highlight/math/collapse) and perform scroll AFTER collapse.
@@ -212,17 +205,18 @@ class NodesManager {
 
 				// Collapse user messages now that DOM is materialized (ensures correct height).
 				try {
-					this._userCollapse.apply(el);
+					this.userCollapse.apply(el);
 				} catch (_) {}
 
 				// Ensure copy icons exist for user messages.
 				try {
-					this._ensureUserCopyIcons(el);
+					this.ensureUserCopyIcons(el);
 				} catch (_) {}
 
 				// Only now scroll to bottom and update FAB – uses post-collapse heights.
 				scrollMgr.scrollToBottom(false);
 				scrollMgr.scheduleScrollFabUpdate();
+				scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 			};
 
 			if (maybePromise && typeof maybePromise.then === 'function') {
@@ -234,6 +228,7 @@ class NodesManager {
 			// In case of error, do a conservative scroll to keep UX responsive.
 			scrollMgr.scrollToBottom(false);
 			scrollMgr.scheduleScrollFabUpdate();
+			scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 		}
 	}
 
@@ -251,22 +246,24 @@ class NodesManager {
 		const userOnly = this._isUserOnlyContent(content);
 		if (userOnly) {
 			el.insertAdjacentHTML('beforeend', content);
-			this._materializeUserMdAsPlainText(el);
+			this.materializeUserMdAsPlainText(el);
 			// Collapse before scrolling to ensure final height is used for scroll computations.
 			try {
-				this._userCollapse.apply(el);
+				this.userCollapse.apply(el);
 			} catch (_) {}
 			// Ensure copy icons exist for user messages.
 			try {
-				this._ensureUserCopyIcons(el);
+				this.ensureUserCopyIcons(el);
 			} catch (_) {}
 
 			scrollMgr.scrollToBottom(false, true);
 			scrollMgr.scheduleScrollFabUpdate();
+			scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 			return;
 		}
 
 		el.insertAdjacentHTML('beforeend', content);
+		this.refreshToolGroups(el);
 
 		try {
 			// Defer KaTeX schedule to post-Markdown to avoid races and collapse before scroll.
@@ -281,17 +278,18 @@ class NodesManager {
 
 				// Collapse after materialization to compute final heights correctly.
 				try {
-					this._userCollapse.apply(el);
+					this.userCollapse.apply(el);
 				} catch (_) {}
 
 				// Ensure copy icons exist for user messages.
 				try {
-					this._ensureUserCopyIcons(el);
+					this.ensureUserCopyIcons(el);
 				} catch (_) {}
 
 				// Now scroll and update FAB using the collapsed layout.
 				scrollMgr.scrollToBottom(false, true);
 				scrollMgr.scheduleScrollFabUpdate();
+				scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 			};
 
 			if (maybePromise && typeof maybePromise.then === 'function') {
@@ -302,6 +300,7 @@ class NodesManager {
 		} catch (_) {
 			scrollMgr.scrollToBottom(false, true);
 			scrollMgr.scheduleScrollFabUpdate();
+			scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 		}
 	}
 
@@ -312,13 +311,22 @@ class NodesManager {
 		const extra = el.querySelector('.msg-extra');
 		if (!extra) return;
 
+		// A delayed extra may target a history row that is currently virtualized.
+		// Materialize it first, mutate/render, then re-measure before it can return
+		// to the virtual pool.
+		try { scrollMgr.virtualization.beginMessageMutation(el); } catch (_) {}
 		extra.insertAdjacentHTML('beforeend', content);
+
+		// Extras live below the streaming timeline. If FOLLOW owns the viewport,
+		// reconcile to the real bottom in the same JS turn; ResizeObserver then
+		// catches later async height changes (Markdown, images, fonts/icons).
+		try { scrollMgr.syncBottomNowIfFollowing(); } catch (_) {}
 
 		try {
 			const maybePromise = this.renderer.renderPendingMarkdown(extra);
 
 			const post = () => {
-				const activeCode = (typeof runtime !== 'undefined' && runtime.stream) ? runtime.stream.activeCode : null;
+				const activeCode = (typeof runtime !== 'undefined' && runtime.stream) ? runtime.stream.code.activeCode : null;
 
 				// Attach observers after Markdown produced the nodes
 				try {
@@ -327,7 +335,7 @@ class NodesManager {
 						minLinesForLast: this.renderer.cfg.PROFILE_CODE.minLinesForHL,
 						minCharsForLast: this.renderer.cfg.PROFILE_CODE.minCharsForHL
 					}, activeCode);
-					this.highlighter.observeMsgBoxes(extra, (box) => this._onBox(box));
+					this.highlighter.observeMsgBoxes(extra, (box) => this.processBox(box));
 				} catch (_) {}
 
 				// KaTeX: honor stream mode; in finalize-only force immediate schedule
@@ -336,6 +344,10 @@ class NodesManager {
 					if (mm === 'finalize-only') this.math.schedule(extra, 0, true);
 					else this.math.schedule(extra);
 				} catch (_) {}
+
+				// Markdown conversion can change line wrapping/height after insertion.
+				try { scrollMgr.virtualization.endMessageMutation(el); } catch (_) {}
+				try { scrollMgr.syncBottomNowIfFollowing(); } catch (_) {}
 			};
 
 			if (maybePromise && typeof maybePromise.then === 'function') {
@@ -344,15 +356,15 @@ class NodesManager {
 				post();
 			}
 		} catch (_) {
-			/* swallow */
+			try { scrollMgr.virtualization.endMessageMutation(el); } catch (__) {}
 		}
 
 		scrollMgr.scheduleScroll(true);
 	}
 
 	// When a new message box appears, hook up code/highlight handlers.
-	_onBox(box) {
-		const activeCode = (typeof runtime !== 'undefined' && runtime.stream) ? runtime.stream.activeCode : null;
+	processBox(box) {
+		const activeCode = (typeof runtime !== 'undefined' && runtime.stream) ? runtime.stream.code.activeCode : null;
 		this.highlighter.observeNewCode(box, {
 			deferLastIfStreaming: true,
 			minLinesForLast: this.renderer.cfg.PROFILE_CODE.minLinesForHL,
@@ -365,13 +377,14 @@ class NodesManager {
 	removeNode(id, scrollMgr) {
 		scrollMgr.prevScroll = 0;
 		let el = document.getElementById('msg-user-' + id);
-		if (el) el.remove();
+		if (el) (el.closest('.msg-user-region') || el).remove();
 		el = document.getElementById('msg-bot-' + id);
 		if (el) el.remove();
 		this.dom.resetEphemeral();
 		try {
 			this.renderer.renderPendingMarkdown();
 		} catch (_) {}
+		scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 		scrollMgr.scheduleScroll(true);
 	}
 
@@ -384,12 +397,13 @@ class NodesManager {
 		let remove = false;
 		elements.forEach((element) => {
 			if (element.id && element.id.endsWith('-' + id)) remove = true;
-			if (remove) element.remove();
+			if (remove) (element.closest('.msg-user-region') || element).remove();
 		});
 		this.dom.resetEphemeral();
 		try {
 			this.renderer.renderPendingMarkdown(container);
 		} catch (_) {}
+		scrollMgr.virtualization.scheduleMessageVirtualizationRefresh();
 		scrollMgr.scheduleScroll(true);
 	}
 }

@@ -6,43 +6,52 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.02 20:00:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
 
+from .core.runtime_packages import RuntimePackages
 from .config import Config
 from .core.access import Access
 from .core.agents import Agents
+from .core.agents_v2 import AgentsV2
+from .core.agent_workflow import AgentWorkflow
 from .core.assistants import Assistants
 from .core.attachments import Attachments
 from .core.audio import Audio
 from .core.bridge import Bridge
-from .core.calendar import Calendar
+from .core.banners import Banners
 from .core.camera import Camera
 # from .core.chain import Chain
 from .core.command import Command
 from .core.ctx import Ctx
+from .core.context_manager import ContextManager
+from .core.connectors import Connectors
 from .core.db import Database
 from .core.debug import Debug
 from .core.dispatcher import Dispatcher
 from .core.experts import Experts
+from .core.extensions import Extensions
+from .core.file_preview import FilePreviews
 from .core.idx import Idx
 from .core.installer import Installer
 from .core.filesystem import Filesystem
-from .core.history import History
 from .core.image import Image
 from .core.llm import LLM
 from .core.models import Models
 from .core.modes import Modes
-from .core.notepad import Notepad
 from .core.platforms import Platforms
 from .core.plugins import Plugins
 from .core.presets import Presets
 from .core.prompt import Prompt
+from .core.profile_exporter import ProfileExporter
 from .core.remote_store import RemoteStore
+from .core.security import Security
 from .core.settings import Settings
+from .core.skills import Skills
 from .core.tabs import Tabs
 from .core.text import Text
 from .core.tokens import Tokens
+from .core.summarizer import Summarizer
 from .core.updater import Updater
 from .core.video import Video
 from .core.vision import Vision
@@ -61,39 +70,48 @@ class Core:
 
         self.access = Access(window)
         self.agents = Agents(window)
+        self.agents_v2 = AgentsV2(window)
+        self.agent_workflow = AgentWorkflow(window)
         self.api = Api(window)
         self.assistants = Assistants(window)
         self.attachments = Attachments(window)
         self.audio = Audio(window)
         self.bridge = Bridge(window)
-        self.calendar = Calendar(window)
         self.camera = Camera(window)
         # self.chain = Chain(window)  # deprecated from v2.5.20
         self.command = Command(window)
         self.config = Config(window)
+        self.banners = Banners(window)
         self.ctx = Ctx(window)
+        self.context_manager = ContextManager(window)
+        self.connectors = Connectors(window)
         self.db = Database(window)
         self.debug = Debug(window)
         self.dispatcher = Dispatcher(window)
         self.experts = Experts(window)
+        self.extensions = Extensions(window)
+        self.file_previews = FilePreviews(window)
+        self.packages = RuntimePackages(window)
         self.filesystem = Filesystem(window)
-        self.history = History(window)
         self.idx = Idx(window)
         self.image = Image(window)
         self.llm = LLM(window)
         self.installer = Installer(window)
         self.models = Models(window)
         self.modes = Modes(window)
-        self.notepad = Notepad(window)
         self.platforms = Platforms(window)
         self.plugins = Plugins(window)
         self.presets = Presets(window)
         self.prompt = Prompt(window)        
+        self.profile_exporter = ProfileExporter(window)
         self.remote_store = RemoteStore(window)
+        self.security = Security(window)
         self.settings = Settings(window)
+        self.skills = Skills(window)
         self.tabs = Tabs(window)
         self.text = Text(window)
         self.tokens = Tokens(window)
+        self.summarizer = Summarizer(window)
         self.updater = Updater(window)
         self.video = Video(window)
         self.vision = Vision(window)
@@ -102,6 +120,7 @@ class Core:
     def init(self):
         """Initialize all components"""
         self.config.init(all=True)
+        self.packages.activate()
         self.platforms.init()
 
     def patch(self):
@@ -118,4 +137,5 @@ class Core:
         self.patch()
         self.debug.update_logger_path()
         self.config.setup_env()
+        self.llm.sync_custom(force=True)
         self.prompt.custom.reload()

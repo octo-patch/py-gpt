@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.06 20:00:00                  #
+# Updated Date: 2026.08.13 16:00:00                  #
 # ================================================== #
 
 import asyncio
@@ -113,10 +113,7 @@ class XAITextToSpeech(BaseProvider):
         host = f"{region}.api.x.ai" if region else "api.x.ai"
         ws_uri = f"wss://{host}/v1/realtime"
 
-        base_dir = self.plugin.window.core.config.path
-        default_name = getattr(self.plugin, "output_file", "output.wav")
-        out_path = os.path.join(base_dir, default_name)
-        out_path = self._ensure_extension(out_path, ".wav" if container == "wav" else ".raw")
+        out_path = self.prepare_output_path(".wav" if container == "wav" else ".raw")
 
         result_queue: queue.Queue[Tuple[bool, Optional[str], Optional[bytes]]] = queue.Queue()
 
@@ -302,7 +299,7 @@ class XAITextToSpeech(BaseProvider):
         """
         Resolve xAI API key from the app's configuration or environment.
         """
-        key = self.plugin.window.core.config.get("api_key_xai")
+        key = self.plugin.window.core.llm.get_config("x_ai", "api_key")
         if key:
             return key
         return os.getenv("XAI_API_KEY")

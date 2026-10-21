@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.27 21:00:00                  #
+# Updated Date: 2026.09.29 12:45:00
 # ================================================== #
 
 import copy
@@ -23,6 +23,8 @@ from pygpt_net.core.types import (
     MODE_AGENT,
     MODE_AGENT_LLAMA,
     MODE_AGENT_OPENAI,
+    MODE_AGENT_V2,
+    MODE_COMPLETION,
     MODE_EXPERT,
 )
 from pygpt_net.utils import trans
@@ -402,7 +404,11 @@ class Importer:
             except Exception as e:
                 print(e)
                 self.set_status(str(e))
-        models = dict(sorted(models.items(), key=lambda item: item[1].id.lower()))
+        models = dict(sorted(models.items(), key=lambda item: (
+            (self.provider == "minimax" and item[1].id != "MiniMax-M3.1-Flash")
+            or (self.provider == "open_router" and item[1].id == "minimax/minimax-m3"),
+            item[1].id.lower(),
+        )))
         return models
 
     def get_provider_available(self) -> Dict:
@@ -432,167 +438,65 @@ class Importer:
             m.name = name
             m.mode = [
                 MODE_CHAT,
+                MODE_COMPLETION,
                 MODE_LLAMA_INDEX,
                 MODE_AGENT,
+                MODE_AGENT_V2,
                 MODE_AGENT_LLAMA,
                 MODE_AGENT_OPENAI,
                 MODE_EXPERT,
             ]
             m.provider = self.provider
-            m.input = ["text"]
+            if self.provider == "minimax":
+                m.mode.remove(MODE_COMPLETION)
+            # Provider model catalogs may expose input capabilities. Keep the
+            # existing text-only default when metadata is unavailable, but
+            # preserve declared image input (notably LiteLLM supports_vision).
+            model_input = model.get("input")
+            if isinstance(model_input, str):
+                model_input = [value.strip() for value in model_input.split(",") if value.strip()]
+            m.input = list(model_input) if isinstance(model_input, (list, tuple, set)) and model_input else ["text"]
             m.output = ["text"]
-            llama_id = id
-            if self.provider == "google":
-                llama_id = "models/" + id
-            m.llama_index['args'] = [
-                {
-                    'name': 'model',
-                    'value': llama_id,
-                    'type': 'str'
-                }
-            ]
             m.imported = True
-            m.ctx = 128000 # default context size
+            try:
+                m.ctx = int(model.get("ctx") or 128000)
+            except (TypeError, ValueError):
+                m.ctx = 128000
+            try:
+                m.tokens = int(model.get("tokens") or 0)
+            except (TypeError, ValueError):
+                m.tokens = 0
+            if "reasoning_effort" in model:
+                m.reasoning_effort = bool(model.get("reasoning_effort"))
+            if "tool_calls" in model:
+                m.tool_calls = bool(model.get("tool_calls"))
             key = m.id
 
-            # prepare args and env config by provider
-            if self.provider == "anthropic":
+            # LlamaIndex args/env are optional per-model overrides only.
+            # With an empty configuration the provider resolves model ID, API
+            # credentials and endpoint from the normal PyGPT model/provider
+            # configuration at runtime. Do not duplicate those values here.
+            if (
+                    self.window.core.llm.is_custom_provider(self.provider)
+                    or (
+                        self.provider in {
+                            "anthropic",
+                            "deepseek_api",
+                            "google",
+                            "openai",
+                            "azure_openai",
+                            "perplexity",
+                            "mistral_ai",
+                            "local_ai",
+                            "open_router",
+                            "x_ai",
+                            "forge",
+                            "edenai",
+                        }
+                        and "tool_calls" not in model
+                    )
+            ):
                 m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'ANTHROPIC_API_KEY',
-                        'value': '{api_key_anthropic}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "deepseek_api":
-                m.tool_calls = True
-                m.llama_index['args'].append(
-                    {
-                        'name': 'api_key',
-                        'value': '{api_key_deepseek}',
-                        'type': 'str'
-                    }
-                )
-                m.llama_index['env'] = [
-                    {
-                        'name': 'DEEPSEEK_API_KEY',
-                        'value': '{api_key_deepseek}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "google":
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'GOOGLE_API_KEY',
-                        'value': '{api_key_google}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider in ["openai", "azure_openai"]:
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'OPENAI_API_KEY',
-                        'value': '{api_key}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_BASE',
-                        'value': '{api_endpoint}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'AZURE_OPENAI_ENDPOINT',
-                        'value': '{api_azure_endpoint}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_VERSION',
-                        'value': '{api_azure_version}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "perplexity":
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'OPENAI_API_KEY',
-                        'value': '{api_key_perplexity}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_BASE',
-                        'value': '{api_endpoint_perplexity}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "mistral_ai":
-                m.tool_calls = True
-                m.llama_index['args'].append(
-                    {
-                        'name': 'api_key',
-                        'value': '{api_key_mistral}',
-                        'type': 'str'
-                    }
-                )
-            elif self.provider == "local_ai":
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'OPENAI_API_KEY',
-                        'value': '{api_key}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_BASE',
-                        'value': '{api_endpoint}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "open_router":
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'OPENAI_API_KEY',
-                        'value': '{api_key_open_router}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_BASE',
-                        'value': '{api_endpoint_open_router}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "x_ai":
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'OPENAI_API_KEY',
-                        'value': '{api_key_xai}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_BASE',
-                        'value': '{api_endpoint_xai}',
-                        'type': 'str'
-                    }
-                ]
-            elif self.provider == "minimax":
-                m.tool_calls = True
-                m.llama_index['env'] = [
-                    {
-                        'name': 'OPENAI_API_KEY',
-                        'value': '{api_key_minimax}',
-                        'type': 'str'
-                    },
-                    {
-                        'name': 'OPENAI_API_BASE',
-                        'value': '{api_endpoint_minimax}',
-                        'type': 'str'
-                    }
-                ]
             models[key] = m
         provider_name = self.window.core.llm.get_provider_name(self.provider)
         self.set_status(trans('models.importer.loaded').replace("{provider}", provider_name))
@@ -631,13 +535,6 @@ class Importer:
                     m.provider = 'ollama'
                     m.input = ["text"]
                     m.output = ["text"]
-                    m.llama_index['args'] = [
-                        {
-                            'name': 'model',
-                            'value': name,
-                            'type': 'str'
-                        }
-                    ]
                     m.imported = True
                     m.ctx = 32000  # default
                     key = m.id
@@ -681,6 +578,7 @@ class Importer:
         self.from_pending()
         self.window.controller.model.init_list()
         self.window.controller.model.update()
+        self.window.controller.model.editor.sync_from_core()
         self.close()
 
         # dispatch on update event

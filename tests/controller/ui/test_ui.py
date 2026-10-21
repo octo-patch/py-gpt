@@ -9,7 +9,7 @@
 # Updated Date: 2024.01.28 12:00:00                  #
 # ================================================== #
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 from tests.mocks import mock_window
 from pygpt_net.controller import UI
@@ -36,14 +36,14 @@ def test_update(mock_window):
     ui.update_toolbox = MagicMock()
     ui.update_chat_label = MagicMock()
     ui.mode.update = MagicMock()
-    ui.update_tokens = MagicMock()
+    ui.request_tokens_update = MagicMock()
 
     ui.update()
 
     ui.update_toolbox.assert_called_once()
     ui.update_chat_label.assert_called_once()
     ui.mode.update.assert_called_once()
-    ui.update_tokens.assert_called_once()
+    ui.request_tokens_update.assert_called_once()
     ui.vision.update.assert_called_once()
 
 
@@ -75,11 +75,14 @@ def test_update_tokens(mock_window):
     mock_window.controller.chat.attachment.get_current_tokens = MagicMock(return_value=0)
     ui = UI(mock_window)
     ui.update_tokens()
-    mock_window.core.config.set("lang", "en")
-    mock_window.ui.nodes['input.counter'].setText.assert_has_calls([
-        call('53 / 66 - 41 tokens'),
-        call('133 + 222 + 41 + 35 + 0 = 71 / 822')
-    ])  # must have EN lang in config to pass!!!!!!!!
+    mock_window.ui.nodes['input.counter'].setText.assert_called_once_with('~ 71 / 822')
+    tooltip = mock_window.ui.nodes['input.counter'].setToolTip.call_args.args[0]
+    assert "222" in tooltip
+    assert "133" in tooltip
+    assert "41" in tooltip
+    # Extra tokens are still counted in TOTAL but intentionally hidden from the tooltip.
+    assert "35" not in tooltip
+    assert "~ 71 / 822" in tooltip
 
 
 def test_store_state(mock_window):
@@ -114,7 +117,7 @@ def test_update_ctx_label_allowed(mock_window):
     mock_window.core.ctx.is_allowed_for_mode = MagicMock(return_value=True)
     mock_window.ui.nodes['chat.label'].setText = MagicMock()
     ui.update_ctx_label()
-    mock_window.ui.nodes['chat.label'].setText.assert_called_with(' (+)')
+    mock_window.ui.nodes['chat.label'].setText.assert_called_with('')
 
 
 def test_update_ctx_label_not_allowed(mock_window):
@@ -124,3 +127,23 @@ def test_update_ctx_label_not_allowed(mock_window):
     mock_window.ui.nodes['chat.label'].setText = MagicMock()
     ui.update_ctx_label()
     mock_window.ui.nodes['chat.label'].setText.assert_called_with('')
+
+
+def test_status_mode_preset_omits_default_and_updates_selected(mock_window, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr('pygpt_net.controller.ui.ui.trans', lambda key: {'mode.chat': 'Czat', 'mode.agent': 'Agent'}[key])
+    label = MagicMock()
+    mock_window.ui.nodes = {'status.mode_preset': label}
+    mock_window.core.config = MagicMock()
+    mock_window.core.config.get.return_value = 'chat'
+    mock_window.controller.presets.get_current.return_value = SimpleNamespace(name='*')
+    ui = UI(mock_window)
+    ui.update_status_mode_preset()
+    label.setText.assert_called_with('Czat')
+    mock_window.controller.presets.get_current.return_value = SimpleNamespace(name='Coder')
+    ui.update_status_mode_preset()
+    label.setText.assert_called_with('Czat | Coder')
+    mock_window.core.config.get.return_value = 'agent'
+    mock_window.controller.presets.get_current.return_value = None
+    ui.update_status_mode_preset()
+    label.setText.assert_called_with('Agent')

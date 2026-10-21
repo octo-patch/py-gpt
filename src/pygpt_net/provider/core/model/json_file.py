@@ -184,6 +184,8 @@ class JsonFileProvider(BaseProvider):
             # 'langchain': item.langchain,
             'llama_index': item.llama_index,
             'ctx': item.ctx,
+            'custom_api_endpoint': item.custom_api_endpoint,
+            'custom_api_key': item.custom_api_key,
             'tokens': item.tokens,
             'default': item.default,
             'input': item.input,
@@ -191,6 +193,7 @@ class JsonFileProvider(BaseProvider):
             'extra': item.extra,
             'imported': item.imported,
             'provider': item.provider,
+            'reasoning_effort': item.reasoning_effort,
             'tool_calls': item.tool_calls,
         }
 
@@ -214,6 +217,10 @@ class JsonFileProvider(BaseProvider):
             item.llama_index = data['llama_index']
         if 'ctx' in data:
             item.ctx = data['ctx']
+        if 'custom_api_endpoint' in data:
+            item.custom_api_endpoint = data['custom_api_endpoint'] or ""
+        if 'custom_api_key' in data:
+            item.custom_api_key = data['custom_api_key'] or ""
         if 'tokens' in data:
             item.tokens = data['tokens']
         if 'default' in data:
@@ -228,6 +235,8 @@ class JsonFileProvider(BaseProvider):
             item.imported = data['imported']
         if 'provider' in data:
             item.provider = data['provider']
+        if 'reasoning_effort' in data:
+            item.reasoning_effort = bool(data['reasoning_effort'])
         if 'tool_calls' in data:
             item.tool_calls = data['tool_calls']
 

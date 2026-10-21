@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.27 17:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 import os
@@ -14,7 +14,7 @@ import threading
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontDatabase, QIcon
-from PySide6.QtWidgets import QSplitter, QMessageBox
+from PySide6.QtWidgets import QSplitter, QMessageBox, QWidget, QHBoxLayout
 
 from .base.context_menu import ContextMenu
 from .dialogs import Dialogs
@@ -23,6 +23,8 @@ from .layout.ctx import CtxMain
 from .layout.toolbox import ToolboxMain
 from .menu import Menu
 from .tray import Tray
+from .toolbar import LeftToolbar, RightToolboxButtonHost
+from .layout.sidebar import pane_order, pane_sizes, placement
 
 
 class UI:
@@ -38,7 +40,6 @@ class UI:
         self.window = window
 
         # bags
-        self.calendar = {}
         self.config = {
             "assistant": {},
             "config": {},
@@ -53,7 +54,6 @@ class UI:
         self.menu = {}
         self.models = {}
         self.nodes = {}
-        self.notepad = {}
         self.parts = {}
         self.paths = {}
         self.plugin_addon = {}
@@ -81,13 +81,21 @@ class UI:
         self.parts['toolbox'] = self.toolbox.setup()
 
         # set width
-        self.parts['ctx'].setMinimumWidth(200)
+        self.parts['ctx'].setMinimumWidth(240)
 
         # horizontal splitter
         self.splitters['main'] = QSplitter(Qt.Horizontal)
-        self.splitters['main'].addWidget(self.parts['ctx'])  # contexts
-        self.splitters['main'].addWidget(self.parts['chat'])  # chat box
-        self.splitters['main'].addWidget(self.parts['toolbox'])  # toolbox
+        for name in pane_order(placement(self.window.core.config)):
+            self.splitters['main'].addWidget(self.parts[name])
+        self.parts['toolbox'].hide()
+
+        # Keep side panes at the width selected by the user when the main
+        # window changes size (especially Normal <-> Maximized).  Without an
+        # explicit stretch policy QSplitter redistributes the extra width
+        # proportionally, which makes the context list and toolbox grow/shrink
+        # together with the window.  The chat pane is the elastic center pane.
+        for index, name in enumerate(pane_order(placement(self.window.core.config))):
+            self.splitters['main'].setStretchFactor(index, int(name == 'chat'))
 
         # menus
         self.menus.setup()
@@ -96,10 +104,32 @@ class UI:
         self.dialogs.setup()
 
         # set central widget
-        self.window.setCentralWidget(self.window.ui.splitters['main'])
+        self.window.setContentsMargins(0, 0, 0, 0)
+        self.window.menuBar().setContentsMargins(0, 0, 0, 0)
+        central = QWidget(self.window)
+        central.setObjectName("mainCentralWidget")
+        central_layout = QHBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        self.parts['toolbar'] = LeftToolbar(self.window)
+        central_layout.addWidget(self.parts['toolbar'])
+        central_layout.addWidget(self.splitters['main'], 1)
+        self.parts['toolbar.right'] = RightToolboxButtonHost(self.window, central)
+        self.update_toolbox_button()
+        self.window.setCentralWidget(central)
 
         # set window title
         self.update_title()
+
+    def update_toolbox_button(self):
+        right = placement(self.window.core.config) == 'right'
+        button = self.nodes['toolbar.toolbox']
+        destination = self.parts['toolbar.right' if right else 'toolbar']
+        button.parentWidget().layout().removeWidget(button)
+        destination.layout().addWidget(button)
+        button.show()
+        self.parts['toolbar.right'].setVisible(right)
+        self.parts['toolbar.right'].update_position()
 
     def on_show(self):
         """Called after MainWindow onShow() event"""
@@ -131,9 +161,9 @@ class UI:
             total_width = self.window.ui.splitters['main'].size().width()
             if total_width > 0:
                 size_output = int(total_width * 0.75)
-                size_ctx = (total_width - size_output) / 2
-                size_toolbox = (total_width - size_output) / 2
-                self.window.ui.splitters['main'].setSizes([size_ctx, size_output, size_toolbox])
+                size_ctx = max(200, total_width - size_output)
+                self.window.ui.splitters['main'].setSizes(pane_sizes(0, size_ctx, size_output, placement(self.window.core.config)))
+                self.window.controller.toolbar.restore_toolbox_state()
             else:
                 QTimer.singleShot(0, set_initial_splitter_width)
         QTimer.singleShot(10, set_initial_splitter_width)

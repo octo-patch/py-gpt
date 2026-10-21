@@ -14,11 +14,14 @@
         <file alias="back.svg">data/icons/back.svg</file>
         <file alias="backspace.svg">data/icons/backspace.svg</file>
         <file alias="block.svg">data/icons/block.svg</file>
+        <file alias="bolt.svg">data/icons/bolt.svg</file>
         <file alias="bookmark.svg">data/icons/bookmark.svg</file>
+        <file alias="bookmark_add.svg">data/icons/bookmark_add.svg</file>
         <file alias="brush.svg">data/icons/brush.svg</file>
         <file alias="build.svg">data/icons/build.svg</file>
         <file alias="calendar.svg">data/icons/calendar.svg</file>
         <file alias="camera.svg">data/icons/camera.svg</file>
+        <file alias="capture.svg">data/icons/capture.svg</file>
         <file alias="case.svg">data/icons/case.svg</file>
         <file alias="chat.svg">data/icons/chat.svg</file>
         <file alias="chat1.svg">data/icons/chat1.svg</file>
@@ -27,6 +30,7 @@
         <file alias="chat4.svg">data/icons/chat4.svg</file>
         <file alias="check.svg">data/icons/check.svg</file>
         <file alias="check_circle.svg">data/icons/check_circle.svg</file>
+        <file alias="checkbox.svg">data/icons/checkbox.svg</file>
         <file alias="checklist.svg">data/icons/checklist.svg</file>
         <file alias="circle.svg">data/icons/circle.svg</file>
         <file alias="clear.svg">data/icons/clear.svg</file>
@@ -86,10 +90,12 @@
         <file alias="mic_off.svg">data/icons/mic_off.svg</file>
         <file alias="more_horizontal.svg">data/icons/more_horizontal.svg</file>
         <file alias="mute.svg">data/icons/mute.svg</file>
+        <file alias="new_chat.svg">data/icons/new_chat.svg</file>
         <file alias="note1.svg">data/icons/note1.svg</file>
         <file alias="note2.svg">data/icons/note2.svg</file>
         <file alias="note3.svg">data/icons/note3.svg</file>
         <file alias="open_tab.svg">data/icons/open_tab.svg</file>
+        <file alias="package.svg">data/icons/package.svg</file>
         <file alias="palette.svg">data/icons/palette.svg</file>
         <file alias="paste.svg">data/icons/paste.svg</file>
         <file alias="pause.svg">data/icons/pause.svg</file>
@@ -105,11 +111,15 @@
         <file alias="power.svg">data/icons/power.svg</file>
         <file alias="print.svg">data/icons/print.svg</file>
         <file alias="public_filled.svg">data/icons/public_filled.svg</file>
+        <file alias="radio_off.svg">data/icons/radio_off.svg</file>
+        <file alias="radio_on.svg">data/icons/radio_on.svg</file>
         <file alias="redo.svg">data/icons/redo.svg</file>
         <file alias="reload.svg">data/icons/reload.svg</file>
         <file alias="repeat.svg">data/icons/repeat.svg</file>
         <file alias="replay.svg">data/icons/replay.svg</file>
         <file alias="resize.svg">data/icons/resize.svg</file>
+        <file alias="right_close.svg">data/icons/right_close.svg</file>
+        <file alias="right_double.svg">data/icons/right_double.svg</file>
         <file alias="robot.svg">data/icons/robot.svg</file>
         <file alias="router.svg">data/icons/router.svg</file>
         <file alias="save.svg">data/icons/save.svg</file>
@@ -124,6 +134,8 @@
         <file alias="shedule.svg">data/icons/shedule.svg</file>
         <file alias="sort.svg">data/icons/sort.svg</file>
         <file alias="split_screen.svg">data/icons/split_screen.svg</file>
+        <file alias="splitter_handle_horizontal_light.svg">data/icons/splitter_handle_horizontal_light.svg</file>
+        <file alias="splitter_handle_vertical_light.svg">data/icons/splitter_handle_vertical_light.svg</file>
         <file alias="stack.svg">data/icons/stack.svg</file>
         <file alias="stacks.svg">data/icons/stacks.svg</file>
         <file alias="star.svg">data/icons/star.svg</file>
@@ -131,6 +143,7 @@
         <file alias="stop_circle.svg">data/icons/stop_circle.svg</file>
         <file alias="stt.svg">data/icons/stt.svg</file>
         <file alias="sync.svg">data/icons/sync.svg</file>
+        <file alias="tab.svg">data/icons/tab.svg</file>
         <file alias="tag.svg">data/icons/tag.svg</file>
         <file alias="target.svg">data/icons/target.svg</file>
         <file alias="task.svg">data/icons/task.svg</file>
@@ -139,6 +152,9 @@
         <file alias="textfile.svg">data/icons/textfile.svg</file>
         <file alias="timer.svg">data/icons/timer.svg</file>
         <file alias="today.svg">data/icons/today.svg</file>
+        <file alias="toggle_off.svg">data/icons/toggle_off.svg</file>
+        <file alias="toggle_on.svg">data/icons/toggle_on.svg</file>
+        <file alias="toltip.svg">data/icons/toltip.svg</file>
         <file alias="translate.svg">data/icons/translate.svg</file>
         <file alias="tts.svg">data/icons/tts.svg</file>
         <file alias="tune.svg">data/icons/tune.svg</file>
@@ -155,12 +171,20 @@
         <file alias="warning.svg">data/icons/warning.svg</file>
         <file alias="web_off.svg">data/icons/web_off.svg</file>
         <file alias="web_on.svg">data/icons/web_on.svg</file>
+        <file alias="web_search.svg">data/icons/web_search.svg</file>
         <file alias="webcam.svg">data/icons/webcam.svg</file>
+        <file alias="webcam2.svg">data/icons/webcam2.svg</file>
         <file alias="webcam_off.svg">data/icons/webcam_off.svg</file>
         <file alias="width.svg">data/icons/width.svg</file>
         <file alias="window.svg">data/icons/window.svg</file>
+        <file alias="window_close.svg">data/icons/window_close.svg</file>
+        <file alias="window_maximize.svg">data/icons/window_maximize.svg</file>
+        <file alias="window_minimize.svg">data/icons/window_minimize.svg</file>
+        <file alias="window_restore.svg">data/icons/window_restore.svg</file>
         <file alias="work.svg">data/icons/work.svg</file>
         <file alias="zoom_in.svg">data/icons/zoom_in.svg</file>
         <file alias="zoom_out.svg">data/icons/zoom_out.svg</file>
+        <file alias="menu_arrow_light.svg">data/icons/menu_arrow_light.svg</file>
+        <file alias="menu_arrow_dark.svg">data/icons/menu_arrow_dark.svg</file>
     </qresource>
 </RCC>

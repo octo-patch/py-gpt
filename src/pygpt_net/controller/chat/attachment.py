@@ -6,11 +6,14 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.02.06 01:00:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
 
+import copy
 import os
-from typing import List, Dict, Any, Union
+import uuid
+from typing import List, Dict, Any, Union, Optional
+from pygpt_net.item.render_attachment import AttachmentPath
 
 from PySide6.QtCore import Slot, QObject
 
@@ -18,16 +21,23 @@ from pygpt_net.core.types import (
     MODE_ASSISTANT,
 )
 from pygpt_net.core.events import KernelEvent
+from pygpt_net.core.text.mentions import iter_tags, KIND_ATTACHMENT
 from pygpt_net.core.bridge import BridgeContext
 from pygpt_net.core.attachments.worker import AttachmentWorker
 from pygpt_net.item.attachment import AttachmentItem
 from pygpt_net.item.ctx import CtxMeta, CtxItem
 from pygpt_net.utils import trans
+from pygpt_net.core.text.mentions import iter_tags, KIND_FILE_CONTEXT
+
+
+# True: read workdir file mentions with the attachment loader at send time.
+# False: preserve the previous path-only behavior. Directories always stay paths.
+WORKDIR_MENTIONS_LOAD_CONTEXT = True
 
 
 class Attachment(QObject):
 
-    MODE_FULL_CONTEXT = 'full'  # attach full context to system prompt
+    MODE_FULL_CONTEXT = 'full'  # attach full context to the uploading user message
     MODE_QUERY_CONTEXT = 'query'  # query context only
     MODE_QUERY_CONTEXT_SUMMARY = 'summary'  # summary full context and attach summary to system prompt
     MODE_DISABLED = 'disabled'  # disabled
@@ -41,6 +51,7 @@ class Attachment(QObject):
         super(Attachment, self).__init__()
         self.window = window
         self.mode = self.MODE_FULL_CONTEXT
+        self.native_upload = False
         self.uploaded = False
         self.uploaded_tab_idx = 3
 
@@ -53,23 +64,156 @@ class Attachment(QObject):
         """
         if self.window.core.attachments.has(mode):
             files = self.window.core.attachments.get_all(mode, only_files=True)
+            native = self.window.core.attachments.native
+            model = native.get_model()
             for id in files:
                 file = files[id]
                 if self.is_allowed(file.path):
                     return True
+                if file.type == AttachmentItem.TYPE_FILE and native.can_upload(file.path, mode, model):
+                    return True
         return False
+
+    def begin_turn(self, meta: CtxMeta):
+        """Reset runtime attachment markers for a new user-visible turn.
+
+        ``additional_ctx_current`` is intentionally runtime-only.  It describes
+        attachments introduced by the current user turn, not all attachments
+        that remain active in the conversation/project.  Keeping it across
+        turns makes old attachments look as if they were sent with every new
+        message and also defeats append-once provider flows.
+        """
+        if meta is None:
+            return
+        meta.additional_ctx_current = []
+        if meta.group is not None:
+            meta.group.additional_ctx_current = []
+
+    @staticmethod
+    def _item_key(item: Dict[str, Any]):
+        """Return a stable runtime key for an additional-context item."""
+        if not isinstance(item, dict):
+            return None
+        if item.get("uuid"):
+            return "uuid", str(item["uuid"])
+        if item.get("archive_id") and item.get("archive_member"):
+            return "archive", str(item["archive_id"]), str(item["archive_member"])
+        return (
+            "path",
+            str(item.get("type") or ""),
+            str(item.get("real_path") or item.get("path") or ""),
+            str(item.get("name") or ""),
+        )
+
+    def _unique_active_items(self, items: list) -> list:
+        """Return active additional-context items without duplicates."""
+        result = []
+        seen = set()
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            if not self.window.core.attachments.context.is_active(item):
+                continue
+            key = self._item_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
+
+    def is_initial_turn(self, ctx: CtxItem, history: List[CtxItem]) -> bool:
+        """Return True for the first user-visible turn in a conversation."""
+        if ctx is None or getattr(ctx, "internal", False):
+            return False
+
+        current_meta_id = getattr(getattr(ctx, "meta", None), "id", None)
+        for item in history or []:
+            if item is ctx or getattr(item, "internal", False):
+                continue
+            if getattr(item, "turn_continuation", False):
+                continue
+            if getattr(item, "input", None) is None:
+                continue
+
+            item_meta_id = getattr(item, "meta_id", None)
+            if item_meta_id is None:
+                item_meta_id = getattr(getattr(item, "meta", None), "id", None)
+            if current_meta_id is None or item_meta_id is None or item_meta_id == current_meta_id:
+                return False
+        return True
+
+    def include_project_attachments_in_current(self, meta: CtxMeta):
+        """Expose shared project attachments as current for the initial turn only."""
+        context = self.window.core.attachments.context
+        if meta is None or not context.is_project_share_enabled(meta) or meta.group is None:
+            return
+
+        merged = [item for item in context.get_project_items(meta) if context.is_shared(item)]
+        merged.extend(meta.additional_ctx_current or [])
+        meta.additional_ctx_current = self._unique_active_items(merged)
+
+    def bind_current_to_ctx(self, ctx: CtxItem, include_project: bool = False):
+        """Persist/render only attachments that belong to this user-visible turn.
+
+        Model-facing attachment context is prepared independently by
+        :meth:`get_context`.  This method deliberately does not use the files
+        reported as *used* while building that model context, because in full
+        context mode those are all active files and would therefore be rendered
+        below every message.
+        """
+        if ctx is None or ctx.meta is None or getattr(ctx, "internal", False):
+            return
+
+        meta = ctx.meta
+        items = list(meta.additional_ctx_current or [])
+        context = self.window.core.attachments.context
+        if any(tag.kind == KIND_ATTACHMENT for tag in iter_tags(ctx.input or "")):
+            ids = context.current_ids(ctx)
+            items.extend(item for item in context.get_turn_items(ctx) if item.get("uuid") in ids)
+        if include_project and context.is_project_share_enabled(meta) and meta.group is not None:
+            items = [item for item in context.get_project_items(meta) if context.is_shared(item)] + items
+        items = self._unique_active_items(items)
+
+        # Keep exact per-turn metadata in the ctx row as well.  This makes the
+        # association durable and independent of the project/conversation list.
+        ctx.additional_ctx = copy.deepcopy(items)
+
+        files = []
+        urls = []
+        for item in items:
+            item_type = item.get("type")
+            path = item.get("real_path") or item.get("path")
+            if not path:
+                continue
+            if item_type == "url":
+                if path not in urls:
+                    urls.append(path)
+            elif item_type in ("local_file", "native_file"):
+                if path not in files:
+                    files.append(path)
+
+        if not isinstance(ctx.files, list):
+            ctx.files = []
+        if not isinstance(ctx.urls, list):
+            ctx.urls = []
+        for path in files:
+            if path not in ctx.files:
+                ctx.files.append(AttachmentPath(path, 'user'))
+            else:
+                ctx.files[ctx.files.index(path)] = AttachmentPath(path, 'user')
+        for url in urls:
+            if url not in ctx.urls:
+                ctx.urls.append(url)
 
     def setup(self):
         """Setup attachments"""
-        self.mode = self.window.core.config.get("ctx.attachment.mode", self.MODE_FULL_CONTEXT)
-        if self.mode == self.MODE_QUERY_CONTEXT:
-            self.window.ui.nodes['input.attachments.ctx.mode.query'].setChecked(True)
-        elif self.mode == self.MODE_QUERY_CONTEXT_SUMMARY:
-            self.window.ui.nodes['input.attachments.ctx.mode.query_summary'].setChecked(True)
-        elif self.mode == self.MODE_FULL_CONTEXT:
-            self.window.ui.nodes['input.attachments.ctx.mode.full'].setChecked(True)
-        elif self.mode == self.MODE_DISABLED:
-            self.window.ui.nodes['input.attachments.ctx.mode.off'].setChecked(True)
+        self.mode = self.MODE_FULL_CONTEXT
+        self.window.core.config.set("ctx.attachment.mode", self.MODE_FULL_CONTEXT)
+
+        self.native_upload = bool(self.window.core.config.get("ctx.attachment.native_upload", False))
+        node = self.window.ui.nodes.get('input.attachments.native_upload')
+        if node is not None:
+            node.setChecked(self.native_upload)
 
     def reload(self):
         """Reload attachments"""
@@ -113,7 +257,8 @@ class Attachment(QObject):
             self,
             meta: CtxMeta,
             mode: str,
-            prompt: str
+            prompt: str,
+            attachments: Optional[dict] = None,
     ) -> bool:
         """
         Upload attachments for meta
@@ -124,10 +269,10 @@ class Attachment(QObject):
         :return: True if uploaded
         """
         self.uploaded = False
-        auto_index = self.window.core.config.get("attachments_auto_index", False)
-        attachments = self.window.core.attachments.get_all(mode, only_files=True)
-        if self.mode != self.MODE_QUERY_CONTEXT:
-            auto_index = False  # disable auto index for full context and summary modes
+        self.window.core.attachments.native.reset()
+        auto_index = False
+        if attachments is None:
+            attachments = self.window.core.attachments.get_all(mode, only_files=True)
 
         if self.is_verbose() and len(attachments) > 0:
             print(f"\nUploading attachments...\nWork Mode: {mode}")
@@ -140,6 +285,7 @@ class Attachment(QObject):
                     meta=meta,
                     prompt=prompt,
                     auto_index=auto_index,
+                    mode=mode,
                 )
                 if result:
                     self.uploaded = True
@@ -149,6 +295,7 @@ class Attachment(QObject):
                     meta=meta,
                     prompt=prompt,
                     auto_index=auto_index,
+                    mode=mode,
                 )
                 if result:
                     self.uploaded = True
@@ -156,12 +303,70 @@ class Attachment(QObject):
             self.window.core.ctx.save(meta.id)  # save meta
         return self.uploaded
 
+    def upload_workdir_mentions(self, meta: CtxMeta, prompt: str) -> bool:
+        """Load mentioned files into the same per-turn context as attachments.
+
+        Use local extraction even when provider-native uploads are enabled, so
+        workdir mentions consistently populate ADDITIONAL CONTEXT. Never load
+        directories recursively or reread duplicate mentions within a turn.
+        """
+        if not WORKDIR_MENTIONS_LOAD_CONTEXT:
+            return False
+        filesystem = self.window.core.filesystem
+        indexing = self.window.core.idx.indexing
+        # Check the global blacklist explicitly: a registered loader must not
+        # override an excluded extension for automatic workdir context loading.
+        excluded = self.window.core.config.get('llama.idx.excluded.ext', '') or ''
+        excluded_extensions = {ext.strip().lower().lstrip('.') for ext in excluded.split(',') if ext.strip()}
+        seen = set()
+        for item in meta.additional_ctx_current or []:
+            if item.get('path'):
+                try:
+                    path = filesystem.normalize_local_path(item['path'], ctx=meta)
+                    seen.add(os.path.normcase(os.path.realpath(path)))
+                except Exception as e:
+                    self.window.core.debug.log(e)
+        uploaded = False
+        for tag in iter_tags(prompt):
+            if tag.kind != KIND_FILE_CONTEXT:
+                continue
+            try:
+                path = filesystem.normalize_local_path(tag.value, ctx=meta)
+                key = os.path.normcase(os.path.realpath(path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                extension = os.path.splitext(path)[1].lower().lstrip('.')
+                if extension in excluded_extensions or not indexing.is_allowed(path):
+                    continue
+                if not os.path.isfile(path):
+                    continue
+                attachment = AttachmentItem(
+                    name=os.path.basename(path), path=path, type=AttachmentItem.TYPE_FILE,
+                )
+                item = self.window.core.attachments.context.upload(
+                    meta=meta, attachment=attachment, prompt=prompt,
+                    real_path=path, auto_index=False,
+                )
+            except Exception as e:
+                # Keep the durable mention intact: provider conversion already
+                # flattens it to its path, so an unreadable file cannot stop Send.
+                self.window.core.debug.log(e)
+                continue
+            if item and item.get('length', 0) > 0:
+                self.append_to_meta(meta, item, attachment)
+                uploaded = True
+        if uploaded:
+            self.window.core.ctx.save(meta.id)
+        return uploaded
+
     def upload_file(
             self,
             attachment: AttachmentItem,
             meta: CtxMeta,
             prompt: str,
-            auto_index: bool
+            auto_index: bool,
+            mode: str
     ) -> bool:
         """
         Upload file attachment
@@ -170,78 +375,179 @@ class Attachment(QObject):
         :param meta: CtxMeta
         :param prompt: User input prompt
         :param auto_index: Auto index
+        :param mode: Work mode
         :return: True if uploaded
         """
         uploaded = False
-        if not self.is_allowed(attachment.path):
+        native = self.window.core.attachments.native
+        model = native.get_model()
+        if not self.is_allowed(attachment.path) and not native.can_upload(attachment.path, mode, model):
             return False
+
+        # A native reference belongs to the current in-memory input attachment.
+        # Reset it before each send so retained attachments cannot accumulate stale refs.
+        if not isinstance(attachment.extra, dict):
+            attachment.extra = {}
+        attachment.extra.pop("native_files", None)
+
         if self.window.core.filesystem.packer.is_archive(attachment.path):
             if self.is_verbose():
                 print(f"Unpacking archive: {attachment.path}")
+            archive_id = str(uuid.uuid4())
+            archive_name = os.path.basename(attachment.path)
             tmp_path = self.window.core.filesystem.packer.unpack(attachment.path)
             if tmp_path:
-                for root, dirs, files in os.walk(tmp_path):
-                    for file in files:
-                        path = str(os.path.join(root, file))
-                        sub_attachment = AttachmentItem()
-                        sub_attachment.path = path
-                        sub_attachment.name = os.path.basename(path)
-                        sub_attachment.consumed = False
-                        path_relative = os.path.relpath(path, tmp_path)
-                        if self.is_allowed(str(path)):
-                            if self.is_verbose():
-                                print(f"Uploading unpacked from archive: {path_relative}")
-                            item = self.window.core.attachments.context.upload(
-                                meta=meta,
-                                attachment=sub_attachment,
-                                prompt=prompt,
-                                real_path=attachment.path,
-                                auto_index=auto_index,
-                            )
-                            if item:
-                                item["path"] = f"{os.path.basename(attachment.path)}/{str(path_relative)}"
+                try:
+                    for root, dirs, files in os.walk(tmp_path):
+                        for file in files:
+                            path = str(os.path.join(root, file))
+                            sub_attachment = AttachmentItem()
+                            sub_attachment.path = path
+                            sub_attachment.consumed = False
+                            path_relative = os.path.relpath(path, tmp_path).replace(os.sep, "/")
+                            sub_attachment.name = path_relative
+
+                            native_ref = self._try_native_upload(path, mode, model, path_relative, meta=meta)
+                            if native_ref:
+                                item = self.window.core.attachments.context.create_native_item(
+                                    attachment=sub_attachment,
+                                    native_ref=native_ref,
+                                    real_path=attachment.path,
+                                )
+                                item["stored_name"] = item["name"]
+                                item["name"] = path_relative
+                                item["context_name"] = path_relative
+                                item["path"] = f"{archive_name}/{path_relative}"
                                 item["size"] = os.path.getsize(path)
-                                self.append_to_meta(meta, item)
+                                item["archive_id"] = archive_id
+                                item["archive_name"] = archive_name
+                                item["archive_path"] = attachment.path
+                                item["archive_member"] = path_relative
+                                self.append_to_meta(meta, item, attachment)
+                                attachment.extra.setdefault("native_files", []).append(native_ref)
                                 uploaded = True
                                 sub_attachment.consumed = True
                                 attachment.consumed = True
-                self.window.core.filesystem.packer.remove_tmp(tmp_path)  # clean
+                                continue
+
+                            if self.is_allowed(path):
+                                if self.is_verbose():
+                                    print(f"Uploading unpacked from archive: {path_relative}")
+                                item = self.window.core.attachments.context.upload(
+                                    meta=meta,
+                                    attachment=sub_attachment,
+                                    prompt=prompt,
+                                    real_path=attachment.path,
+                                    auto_index=auto_index,
+                                )
+                                if item:
+                                    item["stored_name"] = item["name"]
+                                    item["name"] = path_relative
+                                    item["path"] = f"{archive_name}/{path_relative}"
+                                    item["size"] = os.path.getsize(path)
+                                    item["archive_id"] = archive_id
+                                    item["archive_name"] = archive_name
+                                    item["archive_path"] = attachment.path
+                                    item["archive_member"] = path_relative
+                                    self.append_to_meta(meta, item, attachment)
+                                    uploaded = True
+                                    sub_attachment.consumed = True
+                                    attachment.consumed = True
+                finally:
+                    self.window.core.filesystem.packer.remove_tmp(tmp_path)  # clean
         else:
-            item = self.window.core.attachments.context.upload(
-                meta=meta,
-                attachment=attachment,
-                prompt=prompt,
-                real_path=attachment.path,
-                auto_index=auto_index,
-            )
-            if item:
-                self.append_to_meta(meta, item)
-                attachment.consumed = True  # allow for deletion
+            native_ref = self._try_native_upload(attachment.path, mode, model, attachment.name or os.path.basename(attachment.path), meta=meta)
+            if native_ref:
+                item = self.window.core.attachments.context.create_native_item(
+                    attachment=attachment,
+                    native_ref=native_ref,
+                    real_path=attachment.path,
+                )
+                self.append_to_meta(meta, item, attachment)
+                attachment.extra.setdefault("native_files", []).append(native_ref)
+                attachment.consumed = True
                 uploaded = True
+            elif self.is_allowed(attachment.path):
+                item = self.window.core.attachments.context.upload(
+                    meta=meta,
+                    attachment=attachment,
+                    prompt=prompt,
+                    real_path=attachment.path,
+                    auto_index=auto_index,
+                )
+                if item:
+                    self.append_to_meta(meta, item, attachment)
+                    attachment.consumed = True  # allow for deletion
+                    uploaded = True
         return uploaded
 
-    def append_to_meta(self, meta: CtxMeta, item: Dict[str, Any]):
+    def _try_native_upload(
+            self,
+            path: str,
+            mode: str,
+            model,
+            display_name: str,
+            meta: Optional[CtxMeta] = None,
+    ):
+        """Try provider-native upload and return its reference; fall back silently on incompatibility/failure."""
+        core = self.window.core
+        local_context = (core.config.get("context.extra_summary.enabled", False)
+                         or (meta is not None and meta.group is not None))
+        if local_context and self.is_allowed(path) and not core.filesystem.types.is_image(path):
+            return None  # extract text so summary/project retrieval can inspect it
+        native = core.attachments.native
+        if not native.can_upload(path, mode, model):
+            return None
+
+        msg = f"Uploading native attachment: {display_name}"
+        self.window.dispatch(KernelEvent(KernelEvent.STATE_BUSY, {
+            "id": "chat",
+            "msg": msg,
+        }))
+        if self.is_verbose():
+            print(msg)
+        try:
+            ref = native.upload(path, mode, model)
+            if self.is_verbose():
+                print(f"Native upload completed: {display_name} ({ref.get('provider')})")
+            return ref
+        except Exception as e:
+            if self.is_verbose():
+                print(f"Native upload failed for {display_name}, using local context fallback: {e}")
+            return None
+
+    def append_to_meta(self, meta: CtxMeta, item: Dict[str, Any], attachment: Optional[AttachmentItem] = None):
         """
         Append item to meta
 
         :param meta: CtxMeta instance
         :param item: Attachment item
         """
-        if meta.group:
-            if meta.group.additional_ctx is None:
-                meta.group.additional_ctx = []
-            if meta.group.additional_ctx_current is None:
-                meta.group.additional_ctx_current = []
-            meta.group.additional_ctx.append(item)
-            if meta.additional_ctx_current is None:
-                meta.additional_ctx_current = []
-            meta.additional_ctx_current.append(item)
-            return
         if meta.additional_ctx is None:
             meta.additional_ctx = []
         if meta.additional_ctx_current is None:
             meta.additional_ctx_current = []
-        meta.additional_ctx.append(item)
+        context = self.window.core.attachments.context
+        if attachment is not None and attachment.id:
+            item["attachment_id"] = attachment.id
+        if meta.group is not None:
+            context.get_project_items(meta)
+            item["project_active"] = False
+            if attachment is not None and "project_active" in attachment.extra:
+                item["project_active"] = bool(attachment.extra["project_active"])
+            if meta.group.additional_ctx is None:
+                meta.group.additional_ctx = []
+            item["owner_meta_id"] = meta.id
+            meta.group.additional_ctx.append(item)
+            if attachment is not None:
+                pending = (meta.group.extra or {}).get("attachment_share_pending", {})
+                pending.pop(attachment.id, None)
+            self.window.core.ctx.update_group(meta.group)
+            context.refresh_share_flags(meta)
+        else:
+            meta.additional_ctx.append(item)
+        if not context.is_active(item):
+            context.set_display_item_active(meta, item, False)
         meta.additional_ctx_current.append(item)
 
     def upload_web(
@@ -249,7 +555,8 @@ class Attachment(QObject):
             attachment: AttachmentItem,
             meta: CtxMeta,
             prompt: str,
-            auto_index: bool
+            auto_index: bool,
+            mode: str
     ) -> bool:
         """
         Upload web attachment
@@ -258,9 +565,19 @@ class Attachment(QObject):
         :param meta: CtxMeta
         :param prompt: User input prompt
         :param auto_index: Auto index
+        :param mode: Work mode
         :return: True if uploaded
         """
-        return self.upload_file(attachment, meta, prompt, auto_index)
+        # External sources use the configured reader at send time, never a
+        # local file/native upload or the filesystem extension blacklist.
+        item = self.window.core.attachments.context.upload(
+            meta=meta, attachment=attachment, prompt=prompt, auto_index=False,
+        )
+        if not item:
+            return False
+        self.append_to_meta(meta, item, attachment)
+        attachment.consumed = True
+        return True
 
     def has_context(self, meta: CtxMeta) -> bool:
         """
@@ -271,7 +588,7 @@ class Attachment(QObject):
         """
         if meta is None:
             return False
-        return meta.has_additional_ctx()
+        return bool(self.window.core.attachments.context.get_all(meta))
 
     def current_has_context(self) -> bool:
         """
@@ -290,7 +607,7 @@ class Attachment(QObject):
 
         :return: Additional context append mode
         """
-        return self.mode
+        return self.MODE_FULL_CONTEXT
 
     def get_context(
             self,
@@ -313,15 +630,7 @@ class Attachment(QObject):
         self.window.core.attachments.context.reset()  # reset used files and urls
 
         # get additional context from attachments
-        content = self.window.core.attachments.context.get_context(self.mode, ctx, history, only_current=only_current)
-
-        # append used files and urls to context
-        files = self.window.core.attachments.context.get_used_files()
-        urls = self.window.core.attachments.context.get_used_urls()
-        if files:
-            ctx.files = files
-        if urls:
-            ctx.urls = urls
+        content = self.window.core.attachments.context.get_context(self.MODE_FULL_CONTEXT, ctx, history, only_current=only_current)
 
         if content:
             if self.is_verbose():
@@ -345,10 +654,10 @@ class Attachment(QObject):
         :param meta: CtxMeta instance
         """
         # update list of attachments
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             items = []
         else:
-            items = self.window.core.attachments.context.get_all(meta)
+            items = self.window.core.attachments.context.get_display_all(meta)
         self.window.ui.chat.input.attachments_ctx.update(items)
         self.update_tab(meta)
 
@@ -358,17 +667,11 @@ class Attachment(QObject):
 
         :param meta: CtxMeta instance
         """
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             num_files = 0
         else:
             num_files = self.window.core.attachments.context.count(meta)
-        suffix = ''
-        if num_files > 0:
-            suffix = f' ({num_files})'
-        self.window.ui.tabs['input'].setTabText(
-            3,
-            f"{trans('attachments_uploaded.tab')}{suffix}",
-        )
+        self.window.ui.tabs['input'].set_compact_tab_count(3, num_files)
         """
         if num_files > 0:
            self.show_uploaded()
@@ -417,19 +720,21 @@ class Attachment(QObject):
             )
             return
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         ids = idx if isinstance(idx, list) else [idx]
         updated = False
         for idx in sorted(ids, reverse=True):
             if idx < len(items):
                 item = items[idx]
-                self.window.core.attachments.context.delete(meta, item, delete_files=remove_local)
+                self.window.core.attachments.context.delete_display_item(meta, item, delete_files=remove_local)
                 updated = True
         if updated:
             self.update_list(meta)
-            self.window.controller.ctx.update()
+            from pygpt_net.ui.layout.ctx.ctx_list import SHOW_ATTACHMENT_ICONS
+            if SHOW_ATTACHMENT_ICONS:
+                self.window.controller.ctx.update()
 
     def clear(
             self,
@@ -453,11 +758,28 @@ class Attachment(QObject):
             return
 
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return
         self.window.core.attachments.context.clear(meta, delete_files=remove_local)
         self.update_list(meta)
-        self.window.controller.ctx.update()
+        from pygpt_net.ui.layout.ctx.ctx_list import SHOW_ATTACHMENT_ICONS
+        if SHOW_ATTACHMENT_ICONS:
+            self.window.controller.ctx.update()
+
+    def set_active_by_idx(self, idx: int, active: bool):
+        """Set active state for an uploaded context attachment."""
+        meta = self.window.core.ctx.get_current_meta()
+        if meta is None or not self.has_context(meta):
+            return
+        items = self.window.core.attachments.context.get_display_all(meta)
+        if idx < 0 or idx >= len(items):
+            return
+        if self.window.core.attachments.context.set_display_item_active(meta, items[idx], active):
+            self.update_list(meta)
+            from pygpt_net.ui.layout.ctx.ctx_list import SHOW_ATTACHMENT_ICONS
+            if SHOW_ATTACHMENT_ICONS:
+                self.window.controller.ctx.update()
+            self.window.controller.ui.update_tokens()
 
     def select(self, idx: int):
         """
@@ -474,9 +796,9 @@ class Attachment(QObject):
         :param idx: Index on list or list of indices
         """
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         ids = idx if isinstance(idx, list) else [idx]
         for idx in ids:
             if idx < len(items):
@@ -486,7 +808,7 @@ class Attachment(QObject):
                     path = item["real_path"]
                 if os.path.exists(path) and os.path.isfile(path):
                     print(f"Opening attachment: {path}")
-                    self.window.controller.files.open(path)
+                    self.window.tools.get("files").paths.open(path)
 
     def open_dir_src_by_idx(self, idx: Union[int, list]):
         """
@@ -495,9 +817,9 @@ class Attachment(QObject):
         :param idx: Index on list or list of indices
         """
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         ids = idx if isinstance(idx, list) else [idx]
         for idx in ids:
             if idx < len(items):
@@ -508,7 +830,7 @@ class Attachment(QObject):
                 dir = os.path.dirname(path)
                 if os.path.exists(dir) and os.path.isdir(dir):
                     print(f"Opening source directory: {dir}")
-                    self.window.controller.files.open(dir)
+                    self.window.tools.get("files").paths.open(dir)
 
     def open_dir_dest_by_idx(self, idx: Union[int, list]):
         """
@@ -517,17 +839,20 @@ class Attachment(QObject):
         :param idx: Index on list or list of indices
         """
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         ids = idx if isinstance(idx, list) else [idx]
         for idx in ids:
             if idx < len(items):
                 item = items[idx]
                 root_dir = self.window.core.attachments.context.get_dir(meta)
-                dir = os.path.join(root_dir, item["uuid"])
+                if item.get("_archive"):
+                    dir = root_dir
+                else:
+                    dir = os.path.join(root_dir, item["uuid"])
                 if os.path.exists(dir) and os.path.isdir(dir):
-                    self.window.controller.files.open(dir)
+                    self.window.tools.get("files").paths.open(dir)
                     print(f"Opening destination directory: {dir}")
 
     def has_file_by_idx(self, idx: int) -> bool:
@@ -538,9 +863,9 @@ class Attachment(QObject):
         :return: True if has file
         """
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return False
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         if idx < len(items):
             item = items[idx]
             path = item["path"]
@@ -557,9 +882,9 @@ class Attachment(QObject):
         :return: True if has source directory
         """
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return False
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         if idx < len(items):
             item = items[idx]
             path = item["path"]
@@ -577,13 +902,16 @@ class Attachment(QObject):
         :return: True if has destination directory
         """
         meta = self.window.core.ctx.get_current_meta()
-        if meta is None or not meta.has_additional_ctx():
+        if meta is None or not self.has_context(meta):
             return False
-        items = self.window.core.attachments.context.get_all(meta)
+        items = self.window.core.attachments.context.get_display_all(meta)
         if idx < len(items):
             item = items[idx]
             root_dir = self.window.core.attachments.context.get_dir(meta)
-            dir = os.path.join(root_dir, item["uuid"])
+            if item.get("_archive"):
+                dir = root_dir
+            else:
+                dir = os.path.join(root_dir, item["uuid"])
             return os.path.exists(dir) and os.path.isdir(dir)
         return False
 
@@ -593,21 +921,9 @@ class Attachment(QObject):
 
         :return: Current attachments tokens
         """
-        if self.mode != self.MODE_FULL_CONTEXT:
-            return 0
-        meta = self.window.core.ctx.get_current_meta()
-        if meta is None:
-            return 0
-        if not meta.has_additional_ctx():
-            return 0
-        tokens = 0
-        for item in meta.get_additional_ctx():
-            if "tokens" in item:
-                try:
-                    tokens += int(item["tokens"])
-                except Exception as e:
-                    pass
-        return tokens
+        # Extracted text is already counted in the original history message's
+        # final_input. It is no longer appended separately to each new request.
+        return 0
 
     @Slot(object)
     def handle_upload_error(self, error: Exception):
@@ -616,10 +932,15 @@ class Attachment(QObject):
 
         :param error: Exception
         """
+        self.window.ui.dialogs.alert(str(error))
+        request_meta = self.window.core.ctx.output.get_request_meta()
         self.window.dispatch(KernelEvent(KernelEvent.STATE_ERROR, {
             "id": "chat",
-            "msg": f"Error reading attachments: {str(error)}"
+            "msg": f"Error processing attachments: {str(error)}",
+            "meta": request_meta,
         }))
+        self.window.core.ctx.output.finish_request(meta=request_meta)
+        self.window.controller.tabs.sync_focused_chat_context()
 
     @Slot(str)
     def handle_upload_success(self, text: str):
@@ -636,13 +957,19 @@ class Attachment(QObject):
         })
         self.window.dispatch(event)
 
+    def toggle_native_upload(self, enabled: bool):
+        """Enable/disable preference for provider-native file uploads."""
+        self.native_upload = bool(enabled)
+        self.window.core.config.set("ctx.attachment.native_upload", self.native_upload)
+        self.window.core.config.save()
+
     def switch_mode(self, mode: str):
         """
         Switch context mode
 
         :param mode: context mode
         """
-        self.mode = mode
-        self.window.core.config.set("ctx.attachment.mode", mode)
+        self.mode = self.MODE_FULL_CONTEXT
+        self.window.core.config.set("ctx.attachment.mode", self.MODE_FULL_CONTEXT)
         self.window.core.config.save()
         self.window.controller.ui.update_tokens()

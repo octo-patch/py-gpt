@@ -6,21 +6,26 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.17 07:00:00                  #
+# Updated Date: 2026.09.29 19:40:00                  #
 # ================================================== #
 
 from typing import List, Dict, Any, Optional
 
+from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QAction
 
 from pygpt_net.core.types import (
-    MODE_AGENT, MODE_AUDIO,
+    MODE_AUDIO, MODE_EXPERT, MODE_AGENT_V2,
 )
 from pygpt_net.controller.plugins.presets import Presets
 from pygpt_net.controller.plugins.settings import Settings
 from pygpt_net.core.events import Event
 from pygpt_net.item.ctx import CtxItem
 from pygpt_net.utils import trans
+
+
+class PluginUiSignals(QObject):
+    annotation_info = Signal()
 
 
 class Plugins:
@@ -37,6 +42,11 @@ class Plugins:
         self._ids = None
         self._ids_with_update = None
         self._suspend_updates = 0
+        self._ui_signals = PluginUiSignals()
+        self._ui_signals.annotation_info.connect(
+            self.update_annotations_info,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def _begin_batch(self):
         """Begin batch updates"""
@@ -80,25 +90,114 @@ class Plugins:
             plugin = pm.get(pid)
             fn = getattr(plugin, "setup_ui", None)
             if callable(fn):
-                fn()
+                try:
+                    fn()
+                except Exception as e:
+                    self.window.core.debug.error(e)
 
         self.handle_types()
 
     def setup_menu(self):
-        """Set up plugins menu"""
+        """Set up plugins menu."""
         pm = self.window.core.plugins
         ui_menu = self.window.ui.menu
         menu_plugins = ui_menu['plugins']
-        for pid in pm.get_ids(sort=True):
-            if pid in menu_plugins:
-                continue
+
+        for pid in pm.get_ids():
             name = pm.get_name(pid)
             tooltip = pm.get_desc(pid)
-            act = QAction(name, self.window, checkable=True)
-            act.triggered.connect(lambda checked=None, id=pid: self.toggle(id))
+            act = menu_plugins.get(pid)
+            if act is None:
+                act = QAction(name, self.window, checkable=True)
+                act.triggered.connect(lambda checked=None, id=pid: self.toggle(id))
+                menu_plugins[pid] = act
+            else:
+                act.setText(name)
             act.setToolTip(tooltip)
-            menu_plugins[pid] = act
-            ui_menu['menu.plugins'].addAction(act)
+
+        self.rebuild_menu()
+
+    def rebuild_menu(self):
+        """Rebuild plugin actions grouped into base and other plugins."""
+        pm = self.window.core.plugins
+        ui_menu = self.window.ui.menu
+        menu = ui_menu['menu.plugins']
+        menu_plugins = ui_menu['plugins']
+
+        section_common = ui_menu.get('menu.plugins.section.common')
+        if section_common is None:
+            section_common = QAction(trans('menu.plugins.section.common'), self.window)
+            section_common.setEnabled(False)
+            section_font = section_common.font()
+            section_font.setBold(True)
+            section_common.setFont(section_font)
+            ui_menu['menu.plugins.section.common'] = section_common
+        else:
+            section_common.setText(trans('menu.plugins.section.common'))
+
+        section_other = ui_menu.get('menu.plugins.section.other')
+        if section_other is None:
+            section_other = QAction(trans('menu.plugins.section.other'), self.window)
+            section_other.setEnabled(False)
+            section_font = section_other.font()
+            section_font.setBold(True)
+            section_other.setFont(section_font)
+            ui_menu['menu.plugins.section.other'] = section_other
+        else:
+            section_other.setText(trans('menu.plugins.section.other'))
+
+        separator_common = ui_menu.get('menu.plugins.section.common.separator')
+        if separator_common is None:
+            separator_common = QAction(self.window)
+            separator_common.setSeparator(True)
+            ui_menu['menu.plugins.section.common.separator'] = separator_common
+
+        separator_other = ui_menu.get('menu.plugins.section.other.separator')
+        if separator_other is None:
+            separator_other = QAction(self.window)
+            separator_other.setSeparator(True)
+            ui_menu['menu.plugins.section.other.separator'] = separator_other
+
+        separator_end = ui_menu.get('menu.plugins.section.end.separator')
+        if separator_end is None:
+            separator_end = QAction(self.window)
+            separator_end.setSeparator(True)
+            ui_menu['menu.plugins.section.end.separator'] = separator_end
+
+        managed_actions = list(menu_plugins.values()) + [
+            section_common,
+            section_other,
+            separator_common,
+            separator_other,
+            separator_end,
+        ]
+        for action in managed_actions:
+            menu.removeAction(action)
+
+        common_ids = []
+        other_ids = []
+        for pid in pm.get_ids():
+            plugin = pm.get(pid)
+            if plugin is not None and bool(getattr(plugin, 'is_common_plugin', False)):
+                common_ids.append(pid)
+            else:
+                other_ids.append(pid)
+
+        sort_key = lambda pid: pm.get_name(pid).casefold()
+        common_ids.sort(key=sort_key)
+        other_ids.sort(key=sort_key)
+
+        ordered_actions = [separator_common, section_common]
+        ordered_actions.extend(menu_plugins[pid] for pid in common_ids if pid in menu_plugins)
+        ordered_actions.extend([separator_other, section_other])
+        ordered_actions.extend(menu_plugins[pid] for pid in other_ids if pid in menu_plugins)
+        ordered_actions.append(separator_end)
+
+        # Presets and Settings are created by the menu setup before plugin
+        # actions. Re-append only the managed plugin actions so these two
+        # entries always stay at the top of the Plugins menu.
+        for action in ordered_actions:
+            menu.addAction(action)
 
     def setup_config(self, silent: bool = False):
         """
@@ -127,6 +226,12 @@ class Plugins:
         menu_plugins = self.window.ui.menu['plugins']
         for pid, action in menu_plugins.items():
             action.setChecked(self.enabled.get(pid, False))
+
+        mcp_action = self.window.ui.menu.get('config.mcp.enabled')
+        if mcp_action is not None:
+            registered = self.window.core.plugins.is_registered('mcp')
+            mcp_action.setEnabled(registered)
+            mcp_action.setChecked(registered and self.enabled.get('mcp', False))
 
         self.handle_types()
         self.window.controller.ui.mode.update()
@@ -185,12 +290,22 @@ class Plugins:
 
     def is_enabled(self, id: str) -> bool:
         """
-        Check if plugin is enabled
+        Check if plugin is enabled.
+
+        Experts is the built-in executor for expert_call in dedicated Experts
+        mode. In all other modes it follows the normal user-toggleable plugin state.
 
         :param id: plugin id
         :return: True if enabled
         """
-        return self.window.core.plugins.is_registered(id) and self.enabled.get(id, False)
+        registered = self.window.core.plugins.is_registered(id)
+        if not registered:
+            return False
+        if id == "experts":
+            mode = self.window.core.config.get("mode")
+            if mode == MODE_EXPERT:
+                return bool(self.window.core.experts.get_experts())
+        return self.enabled.get(id, False)
 
     def toggle(self, id: str):
         """
@@ -236,30 +351,59 @@ class Plugins:
 
     def set_by_tab(self, idx: int):
         """
-        Set current plugin by tab index
+        Set current plugin by tab index.
+
+        Plugin identity is read from the tab widget itself instead of being
+        inferred from a freshly sorted plugin list. This is important after a
+        runtime language change, when translated names may sort differently.
 
         :param idx: tab index
         """
-        pm = self.window.core.plugins
-        plugin_idx = 0
-        for pid in pm.get_ids(sort=True):
-            if pm.has_options(pid):
-                if plugin_idx == idx:
-                    self.settings.current_plugin = pid
-                    break
-                plugin_idx += 1
-        current = self.window.ui.models['plugin.list'].index(idx, 0)
-        self.window.ui.nodes['plugin.list'].setCurrentIndex(current)
+        tabs = self.window.ui.tabs.get('plugin.settings')
+        if tabs is None or idx < 0 or idx >= tabs.count():
+            return
+
+        tab = tabs.widget(idx)
+        plugin_id = tab.property('plugin_id') if tab is not None else None
+
+        # Compatibility fallback for a dialog created before plugin_id was
+        # attached to tabs.
+        if not plugin_id:
+            ids = self.window.core.plugins.get_ids(sort=True)
+            if idx >= len(ids):
+                return
+            plugin_id = ids[idx]
+
+        self.settings.current_plugin = plugin_id
+
+        # The visible list may have a different order than the tabs after
+        # retranslation. Select the row by stable plugin id, never by idx.
+        model = self.window.ui.models.get('plugin.list')
+        node = self.window.ui.nodes.get('plugin.list')
+        if model is None or node is None:
+            return
+        for row in range(model.rowCount()):
+            current = model.index(row, 0)
+            if current.data(Qt.UserRole) == plugin_id:
+                node.setCurrentIndex(current)
+                break
 
     def get_tab_idx(self, plugin_id: str) -> Optional[int]:
         """
-        Get plugin tab index
+        Get plugin tab index by stable plugin id.
 
         :param plugin_id: plugin id
         :return: tab index or None if not found
         """
-        pm = self.window.core.plugins
-        for i, pid in enumerate(pm.get_ids(sort=True)):
+        tabs = self.window.ui.tabs.get('plugin.settings')
+        if tabs is not None:
+            for i in range(tabs.count()):
+                tab = tabs.widget(i)
+                if tab is not None and tab.property('plugin_id') == plugin_id:
+                    return i
+
+        # Compatibility fallback before the plugin settings dialog is built.
+        for i, pid in enumerate(self.window.core.plugins.get_ids(sort=True)):
             if pid == plugin_id:
                 return i
         return None
@@ -280,13 +424,10 @@ class Plugins:
 
         pm = self.window.core.plugins
         for pid in pm.get_ids():
-            plugin = pm.get(pid)
-            fn = getattr(pm, "destroy", None)
-            if callable(fn):
-                try:
-                    pm.destroy(pid)
-                except AttributeError:
-                    pass
+            try:
+                pm.destroy(pid)
+            except AttributeError:
+                pass
 
     def has_type(self, id: str, type: str):
         """
@@ -356,20 +497,125 @@ class Plugins:
                 if callable(fn):
                     fn()
 
+    def _status_tooltip(self, header_key: str, items=None) -> str:
+        """Build a compact status tooltip containing only status items."""
+        if items:
+            return "\n".join(items)
+        return ""
+
     def update_info(self):
-        """Update plugins info"""
+        """Update plugin/MCP/Skill and annotation counters below the chat input."""
         pm = self.window.core.plugins
+
+        # Plugins
         enabled_names = []
-        c = 0
+        plugin_count = 0
         for pid in pm.get_ids():
             if self.is_enabled(pid):
-                c += 1
-                enabled_names.append(pm.get(pid).name)
+                plugin_count += 1
+                enabled_names.append(pm.get_name(pid))
 
-        tooltip = " + ".join(enabled_names)
-        count_str = f"+ {c} {trans('chatbox.plugins')}" if c > 0 else ""
-        self.window.ui.nodes['chat.plugins'].setText(count_str)
-        self.window.ui.nodes['chat.plugins'].setToolTip(tooltip)
+        plugin_label = self.window.ui.nodes['chat.plugins']
+        if plugin_count > 0:
+            enabled_names.sort(key=str.casefold)
+            plugin_label.setCount(plugin_count)
+            plugin_label.setToolTip(self._status_tooltip("menu.plugins", enabled_names))
+            plugin_label.setVisible(True)
+        else:
+            plugin_label.clear()
+            plugin_label.setToolTip("")
+            plugin_label.setVisible(False)
+
+        # MCP count means active configured MCP servers. Keep it hidden when
+        # the MCP plugin itself is disabled, even if server rows remain active
+        # in its saved configuration.
+        mcp_label = self.window.ui.nodes.get('chat.mcp')
+        mcp_names = []
+        if self.is_enabled("mcp"):
+            try:
+                mcp = pm.get("mcp")
+                servers = mcp.get_option_value("servers") if mcp is not None else []
+                for server in (servers or []):
+                    if not isinstance(server, dict) or not bool(server.get("active", False)):
+                        continue
+                    name = str(server.get("label") or server.get("server_address") or "").strip()
+                    if name:
+                        mcp_names.append(name)
+            except Exception:
+                mcp_names = []
+
+        if mcp_label is not None:
+            if mcp_names:
+                mcp_names.sort(key=str.casefold)
+                mcp_label.setCount(len(mcp_names))
+                mcp_label.setToolTip(self._status_tooltip("menu.config.mcp", mcp_names))
+                mcp_label.setVisible(True)
+            else:
+                mcp_label.clear()
+                mcp_label.setToolTip("")
+                mcp_label.setVisible(False)
+
+        # Skills participate only in the Agents v2 / Chat with Agents runtime.
+        skills_label = self.window.ui.nodes.get('chat.skills')
+        skill_names = []
+        if self.window.core.config.get("mode") == MODE_AGENT_V2:
+            try:
+                for skill in self.window.core.skills.list_installed(enabled_only=True):
+                    if not isinstance(skill, dict):
+                        continue
+                    name = str(skill.get("name") or skill.get("dir_name") or "").strip()
+                    if name:
+                        skill_names.append(name)
+            except Exception:
+                skill_names = []
+
+        if skills_label is not None:
+            if skill_names:
+                skill_names.sort(key=str.casefold)
+                skills_label.setCount(len(skill_names))
+                skills_label.setToolTip(self._status_tooltip("menu.skills", skill_names))
+                skills_label.setVisible(True)
+            else:
+                skills_label.clear()
+                skills_label.setToolTip("")
+                skills_label.setVisible(False)
+
+        self.update_annotations_info()
+
+    def request_annotations_info_update(self):
+        """Thread-safe request to refresh the annotation counter on the UI thread."""
+        self._ui_signals.annotation_info.emit()
+
+    def update_annotations_info(self):
+        """Update the combined Canvas/chat/files annotation counter."""
+        label = self.window.ui.nodes.get('chat.annotations')
+        if label is None:
+            return
+
+        count = 0
+        try:
+            meta = self.window.core.ctx.get_current_meta()
+            session = self.window.controller.chat.text.get_annotations(meta)
+            if session is not None:
+                count += len(session.annotations)
+        except Exception:
+            pass
+
+        try:
+            tool = self.window.tools.get("web_browser")
+            if tool is not None:
+                count += len(tool.get_annotations())
+        except Exception:
+            pass
+
+        if count > 0:
+            label.setCount(count)
+            label.setToolTip(str(trans("plugin.tab.annotations")).strip())
+            label.setVisible(True)
+        else:
+            label.clear()
+            label.setToolTip(str(trans("plugin.tab.annotations")).strip())
+            label.setVisible(False)
 
     def _apply_cmds_common(
             self,
@@ -396,14 +642,9 @@ class Plugins:
             return
 
         event = Event(event_type, {'commands': commands})
-        mode = self.window.core.config.get('mode')
         self.log("Executing plugin commands..." if event_type == Event.CMD_EXECUTE else "Executing inline plugin commands...")
-        change_status = True
-        if mode == MODE_AGENT and len(cmds) == 1 and cmds[0].get("cmd") == "goal_update":
-            change_status = False
         wait_str = trans('status.cmd.wait')
-        if change_status:
-            self.window.update_status(wait_str)
+        self.window.update_status(wait_str)
 
         ctx.results = []
         event.ctx = ctx
@@ -474,6 +715,22 @@ class Plugins:
         self.settings.init()
         self.update()
 
+    def shutdown(self):
+        """Run the shutdown hook for every registered plugin."""
+        pm = self.window.core.plugins
+        for pid in pm.get_ids():
+            plugin = pm.get(pid)
+            if plugin is None:
+                continue
+
+            enabled = bool(self.enabled.get(pid, getattr(plugin, 'enabled', False)))
+            try:
+                plugin.shutdown(enabled=enabled)
+            except Exception as e:
+                self.window.core.debug.log(
+                    f"Plugin shutdown failed ({pid}): {e}"
+                )
+
     def save_all(self):
         """Save plugin settings"""
         pm = self.window.core.plugins
@@ -485,7 +742,13 @@ class Plugins:
                 cfg_plugins[pid] = {}
             dest = cfg_plugins[pid]
             for key, opt in plugin.options.items():
-                dest[key] = opt['value']
+                if opt.get('type') == 'button':
+                    continue
+                if opt.get('type') == 'cmd':
+                    value = opt.get('value')
+                    dest[key] = bool(value.get('enabled', False)) if isinstance(value, dict) else bool(value)
+                else:
+                    dest[key] = opt['value']
 
         for key in list(cfg_plugins.keys()):
             if key not in pm.plugins:

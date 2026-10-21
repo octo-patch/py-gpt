@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.05 18:00:00                  #
+# Updated Date: 2026.08.16 19:55:00                  #
 # ================================================== #
 
 import time
@@ -41,6 +41,9 @@ def dummy_window():
     window.core.config.get = MagicMock(side_effect=lambda k, default=None: config_values.get(k, default))
     window.core.ctx = MagicMock()
     window.core.ctx.get_history = MagicMock(return_value=[])
+    window.core.attachments = MagicMock()
+    window.core.attachments.native = MagicMock()
+    window.core.attachments.native.get_refs = MagicMock(return_value=[])
     window.core.api.openai.vision = MagicMock()
     window.core.api.openai.vision.build_content = MagicMock(side_effect=lambda content, attachments: content + " vision")
     window.core.api.openai.audio = MagicMock()
@@ -55,10 +58,12 @@ def dummy_window():
 def dummy_model():
     model = MagicMock()
     model.id = "gpt-3-chat"
+    model.name = "gpt-3-chat"
     model.ctx = 4096
     model.extra = {}
     model.mode = ["chat"]
     model.is_gpt = MagicMock(return_value=True)
+    model.is_ollama = MagicMock(return_value=False)
     model.is_image_input = MagicMock(return_value=False)
     model.is_audio_input = MagicMock(return_value=False)
     return model
@@ -106,6 +111,26 @@ def test_build_without_history(dummy_window, dummy_model, dummy_ctx):
     assert messages[1]["role"] == "user"
     assert "Hello" in messages[1]["content"]
     assert chat.input_tokens == 10
+
+def test_build_with_native_file(dummy_window, dummy_model):
+    dummy_window.core.attachments.native.get_refs.return_value = [
+        {"provider": "openai", "id": "file_123"}
+    ]
+    chat = Chat(window=dummy_window)
+    messages = chat.build(
+        "Hello",
+        "system",
+        dummy_model,
+        history=[],
+        attachments={},
+        ai_name="assistant",
+        user_name="user",
+        multimodal_ctx=None,
+    )
+    assert messages[-1]["content"] == [
+        {"type": "text", "text": "Hello"},
+        {"type": "file", "file": {"file_id": "file_123"}},
+    ]
 
 def test_build_with_vision(dummy_window, dummy_model, dummy_ctx):
     dummy_model.is_image_input = MagicMock(return_value=True)
@@ -198,3 +223,18 @@ def test_unpack_response_audio_without_audio(dummy_window, dummy_ctx):
     assert dummy_ctx.input_tokens == 9
     assert dummy_ctx.output_tokens == 10
     assert dummy_ctx.total_tokens == 19
+
+def test_attachment_context_replays_with_original_user_message(dummy_window, dummy_model):
+    first = CtxItem()
+    first.input = "Analyze file"
+    first.hidden_input = "ADDITIONAL CONTEXT: file text"
+    first.output = "Analysis"
+    dummy_window.core.config.get = MagicMock(side_effect=lambda key, default=None: {
+        "use_context": True, "max_total_tokens": 4096, "func_call.native": False,
+    }.get(key, default))
+    dummy_window.core.ctx.get_history.return_value = [first]
+    messages = Chat(dummy_window).build("Follow up", "System", dummy_model, history=[first])
+    users = [message for message in messages if message["role"] == "user"]
+    assert users[0]["content"] == "Analyze file\n\nADDITIONAL CONTEXT: file text"
+    assert users[1]["content"] == "Follow up"
+    assert all("ADDITIONAL CONTEXT" not in str(message["content"]) for message in messages if message["role"] == "system")

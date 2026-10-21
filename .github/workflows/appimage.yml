@@ -1,0 +1,552 @@
+name: Tests + Appimage build
+on:
+  # Build verification after changes reach master.
+  # The generated AppImages stay only on the runner and are discarded when
+  # the job finishes; they are not stored as GitHub Actions artifacts.
+  push:
+    branches:
+      - master
+
+  # Preferred release flow:
+  # create/edit the release in the GitHub UI and click "Publish release".
+  # The workflow builds both architectures from the release tag and uploads
+  # the resulting files directly to that existing GitHub Release.
+  release:
+    types: [published]
+
+  # Manual fallback / backfill mode.
+  # Enter an existing release tag (for example v2.8.1) to build exactly that
+  # tagged source and attach/replace AppImage assets in the existing release.
+  # Leave the field empty for a build-only verification run.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to publish to (e.g. v2.8.1); leave empty for build only'
+        required: false
+        type: string
+
+# Avoid wasting runners when the same branch/release is started again.
+concurrency:
+  group: appimage-${{ github.event.release.tag_name || inputs.release_tag || github.ref }}
+  cancel-in-progress: true
+
+# Read-only by default. The build job gets write access because release builds
+# upload their files directly from the native x86_64/aarch64 runner.
+permissions:
+  contents: read
+
+# Tell GitHub CLI which repository to use even in jobs that intentionally do
+# not checkout the source tree (prepare/checksums). This prevents gh from
+# trying to discover the repository from a local .git directory.
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Prepare build
+    runs-on: ubuntu-22.04
+
+    outputs:
+      source_ref: ${{ steps.target.outputs.source_ref }}
+      release_tag: ${{ steps.target.outputs.release_tag }}
+      publish: ${{ steps.target.outputs.publish }}
+
+    steps:
+      - name: Resolve source and release target
+        id: target
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag }}
+          CURRENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG=""
+          SOURCE_REF="$CURRENT_SHA"
+          PUBLISH="false"
+
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            RELEASE_TAG="$EVENT_RELEASE_TAG"
+            SOURCE_REF="$EVENT_RELEASE_TAG"
+            PUBLISH="true"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$MANUAL_RELEASE_TAG" ]]; then
+            REQUESTED_TAG="$MANUAL_RELEASE_TAG"
+
+            # Resolve the existing release before starting two large builds.
+            # Accept both the exact tag (for example v2.8.1) and the convenient
+            # shorthand without the leading v (for example 2.8.1). GH_REPO is
+            # set at workflow level, so gh does not need a local .git checkout.
+            if gh release view "$REQUESTED_TAG" >/dev/null 2>&1; then
+              RELEASE_TAG="$REQUESTED_TAG"
+            elif [[ "$REQUESTED_TAG" != v* ]] && gh release view "v${REQUESTED_TAG}" >/dev/null 2>&1; then
+              RELEASE_TAG="v${REQUESTED_TAG}"
+            else
+              echo "GitHub Release not found for tag '$REQUESTED_TAG' (also tried 'v$REQUESTED_TAG')." >&2
+              exit 1
+            fi
+
+            SOURCE_REF="$RELEASE_TAG"
+            PUBLISH="true"
+          fi
+
+          if [[ "$PUBLISH" == "true" && -z "$RELEASE_TAG" ]]; then
+            echo "Release tag is empty" >&2
+            exit 1
+          fi
+
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+
+          echo "Source ref: $SOURCE_REF"
+          if [[ "$PUBLISH" == "true" ]]; then
+            echo "Release target: $RELEASE_TAG"
+          else
+            echo "Build-only run; output will not be stored"
+          fi
+
+  tests:
+    name: Tests (Python 3.10 / pytest 7.4.4)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+          persist-credentials: false
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ffmpeg \
+            libdbus-1-3 \
+            libegl1 \
+            libgl1 \
+            libpulse0 \
+            portaudio19-dev \
+            xauth \
+            xvfb
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+          # Keep the CI test runner pinned even if requirements.txt changes later.
+          python -m pip install 'pytest==7.4.4'
+          python -m pytest --version
+
+      - name: Run tests
+        shell: bash
+        env:
+          ENV_TEST: '1'
+          TEST_LANGUAGE: en
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          xvfb-run -a python -m pytest tests -vv
+
+  build:
+    name: Build ${{ matrix.appimage_arch }}
+    needs:
+      - prepare
+      - tests
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      (
+        github.event_name == 'release' ||
+        needs.tests.result == 'success'
+      )
+
+    # Required only by the conditional release-upload step below. There is no
+    # pull_request trigger, so untrusted PR code never receives this token.
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            deb_arch: amd64
+            appimage_arch: x86_64
+            ubuntu_series: jammy
+            python_version: '3.10'
+            fuse_package: libfuse2
+            archive_mirror: http://archive.ubuntu.com/ubuntu
+            security_mirror: http://security.ubuntu.com/ubuntu
+          - runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            appimage_arch: aarch64
+            ubuntu_series: noble
+            python_version: '3.12'
+            fuse_package: libfuse2t64
+            archive_mirror: http://ports.ubuntu.com/ubuntu-ports
+            security_mirror: http://ports.ubuntu.com/ubuntu-ports
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+          persist-credentials: false
+
+      - name: Resolve application version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$RELEASE_TAG" ]]; then
+            VERSION="${RELEASE_TAG#v}"
+          else
+            VERSION="$(python3 - <<'PY'
+          from pathlib import Path
+
+          for line in Path("AppImageBuilder.yml").read_text(encoding="utf-8").splitlines():
+              if line.startswith("    version:"):
+                  print(line.split(":", 1)[1].strip().strip("'\""))
+                  break
+          else:
+              raise SystemExit("Could not find AppDir.app_info.version in AppImageBuilder.yml")
+          PY
+          )"
+          fi
+
+          if [[ -z "$VERSION" ]]; then
+            echo "Application version is empty" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building PyGPT $VERSION for ${{ matrix.appimage_arch }}"
+
+      - name: Install appimage-builder
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          # Some Python dependencies (notably PyAudio) are built from source
+          # on Linux. Keep their development headers/toolchain on the runner;
+          # only runtime libraries are bundled into the AppImage recipe.
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            build-essential \
+            coreutils \
+            desktop-file-utils \
+            fakeroot \
+            ${{ matrix.fuse_package }} \
+            libgdk-pixbuf2.0-dev \
+            patchelf \
+            portaudio19-dev \
+            python3-dev \
+            python3-pip \
+            python3-setuptools \
+            python3-venv \
+            squashfs-tools \
+            strace \
+            util-linux \
+            zsync
+
+          BUILDER_VENV="$RUNNER_TEMP/appimage-builder-venv"
+          python3 -m venv "$BUILDER_VENV"
+          "$BUILDER_VENV/bin/python3" -m pip install --upgrade pip setuptools wheel
+          "$BUILDER_VENV/bin/python3" -m pip install 'appimage-builder==1.1.0' packaging-legacy
+
+          # appimage-builder 1.1.0 compares Debian/Ubuntu package versions
+          # (for example 1.21.1ubuntu2) with packaging.version. Modern
+          # packaging rejects these non-PEP-440 versions. Use the legacy
+          # parser for appimage-builder's apt Package class instead.
+          PACKAGE_PY="$("$BUILDER_VENV/bin/python3" - <<'PY_PACKAGE'
+          from pathlib import Path
+          import appimagebuilder
+
+          print(
+              Path(appimagebuilder.__file__).resolve().parent
+              / "modules" / "deploy" / "apt" / "package.py"
+          )
+          PY_PACKAGE
+          )"
+
+          test -f "$PACKAGE_PY"
+          sed -i 's/^from packaging import version$/from packaging_legacy import version/' "$PACKAGE_PY"
+          grep -q '^from packaging_legacy import version$' "$PACKAGE_PY"
+
+          "$BUILDER_VENV/bin/python3" - <<'PY_VERIFY'
+          from packaging_legacy import version
+
+          # Must not raise InvalidVersion for Ubuntu/Debian package versions.
+          assert version.parse("1.21.1ubuntu2")
+          print("Legacy Debian/Ubuntu version parser: OK")
+          PY_VERIFY
+
+          echo "$BUILDER_VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare architecture-specific recipe
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+          ARCHIVE_MIRROR: ${{ matrix.archive_mirror }}
+          SECURITY_MIRROR: ${{ matrix.security_mirror }}
+          UBUNTU_SERIES: ${{ matrix.ubuntu_series }}
+          PYTHON_VERSION: ${{ matrix.python_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p .ci
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          src = Path("AppImageBuilder.yml")
+          dst = Path(".ci") / f"AppImageBuilder-{os.environ['APPIMAGE_ARCH']}.yml"
+          text = src.read_text(encoding="utf-8")
+
+          version = os.environ["VERSION"]
+          deb_arch = os.environ["DEB_ARCH"]
+          appimage_arch = os.environ["APPIMAGE_ARCH"]
+          archive_mirror = os.environ["ARCHIVE_MIRROR"]
+          security_mirror = os.environ["SECURITY_MIRROR"]
+          ubuntu_series = os.environ["UBUNTU_SERIES"]
+          python_version = os.environ["PYTHON_VERSION"]
+
+          text, count = re.subn(
+              r"(?m)^    version:\s*.*$",
+              f"    version: {version}",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not rewrite AppDir.app_info.version")
+
+          text, count = re.subn(
+              r"(?m)^    arch:\s*(?:amd64|arm64)\s*$",
+              f"    arch: {deb_arch}",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not rewrite AppDir.apt.arch")
+
+          text = re.sub(r"\[arch=(?:amd64|arm64)\]", f"[arch={deb_arch}]", text)
+          text = text.replace("http://archive.ubuntu.com/ubuntu", archive_mirror)
+          text = text.replace("http://security.ubuntu.com/ubuntu", security_mirror)
+          text = text.replace("http://ports.ubuntu.com/ubuntu-ports", archive_mirror)
+
+          # Qt/PySide6 6.9.x ARM64 wheels are manylinux_2_39 and therefore
+          # require glibc >= 2.39. Keep x86_64 on Jammy for compatibility,
+          # but generate the ARM64 AppDir from Noble packages.
+          text = re.sub(r"\bjammy(?=(?:-updates|-security)?\b)", ubuntu_series, text)
+
+          # The default recipe is Jammy/Python 3.10. Noble ships Python 3.12,
+          # so rewrite only the hard-coded runtime site-packages paths in the
+          # generated ARM64 recipe. Generic python3 commands remain unchanged.
+          text = text.replace("python3.10", f"python{python_version}")
+
+          # Ubuntu 24.04/Noble renamed several runtime libraries as part of
+          # the 64-bit time_t (t64) transition. The xapp binary package was
+          # also split into separate GTK module and status-notifier packages.
+          # Keep the repository recipe Jammy-compatible for local x86_64
+          # builds and apply these substitutions only to generated Noble ARM64
+          # recipes.
+          if ubuntu_series == "noble":
+              noble_package_map = {
+                  "libasound2": "libasound2t64",
+                  "libglib2.0-0": "libglib2.0-0t64",
+                  "libgtk-3-0": "libgtk-3-0t64",
+                  "libpng16-16": "libpng16-16t64",
+              }
+              for old_name, new_name in noble_package_map.items():
+                  text = re.sub(
+                      rf"(?m)^(\s*-\s*){re.escape(old_name)}\s*$",
+                      rf"\1{new_name}",
+                      text,
+                  )
+
+              text, xapp_count = re.subn(
+                  r"(?m)^(\s*)-\s*xapp\s*$",
+                  r"\1- libxapp-gtk3-module\n\1- xapp-sn-watcher",
+                  text,
+                  count=1,
+              )
+              if xapp_count != 1:
+                  raise SystemExit("Could not rewrite Noble xapp packages")
+
+          text, count = re.subn(
+              r"(?m)^  arch:\s*(?:x86_64|aarch64)\s*$",
+              f"  arch: {appimage_arch}",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not rewrite AppImage.arch")
+
+          # Rewrite the complete update-information field rather than relying
+          # on the current recipe already having an architecture-specific
+          # pattern. This also makes manual rebuilds of older tags work.
+          update_info = (
+              '  update-information: '
+              f'"gh-releases-zsync|szczyglis-dev|py-gpt|latest|'
+              f'PyGPT-*-{appimage_arch}.AppImage.zsync"'
+          )
+          text, count = re.subn(
+              r"(?m)^  update-information:\s*.*$",
+              update_info,
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not rewrite AppImage.update-information")
+
+          dst.write_text(text, encoding="utf-8")
+          print(f"Generated {dst}")
+          PY
+
+          echo '--- generated recipe architecture / base ---'
+          grep -E '(^    version:|^    arch:|^  arch:|sourceline:|python3\.(10|12)|update-information:)' \
+            ".ci/AppImageBuilder-${APPIMAGE_ARCH}.yml"
+
+      - name: Build AppImage
+        shell: bash
+        env:
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+
+          rm -rf AppDir appimage-builder-cache
+          rm -f ./*.AppImage ./*.AppImage.zsync
+
+          appimage-builder \
+            --recipe ".ci/AppImageBuilder-${APPIMAGE_ARCH}.yml" \
+            --skip-test
+
+      - name: Verify build output
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+
+          APPIMAGE="PyGPT-${VERSION}-${APPIMAGE_ARCH}.AppImage"
+          ZSYNC="${APPIMAGE}.zsync"
+
+          test -s "$APPIMAGE"
+          test -s "$ZSYNC"
+
+          file "$APPIMAGE"
+          ls -lh "$APPIMAGE" "$ZSYNC"
+
+      - name: Upload directly to GitHub Release
+        if: needs.prepare.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+
+          APPIMAGE="PyGPT-${VERSION}-${APPIMAGE_ARCH}.AppImage"
+          ZSYNC="${APPIMAGE}.zsync"
+
+          # Protect manual mode from accidentally creating a new release.
+          gh release view "$TAG" >/dev/null
+
+          # Replace only assets with identical names. The release title/body
+          # and every unrelated asset remain untouched.
+          gh release upload "$TAG" "$APPIMAGE" "$ZSYNC" --clobber
+
+  checksums:
+    name: Publish checksums
+    if: needs.prepare.outputs.publish == 'true'
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-22.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download published AppImages from release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+          mkdir -p release-assets
+
+          gh release download "$TAG" \
+            --pattern "PyGPT-${VERSION}-x86_64.AppImage" \
+            --pattern "PyGPT-${VERSION}-aarch64.AppImage" \
+            --dir release-assets \
+            --clobber
+
+          test -s "release-assets/PyGPT-${VERSION}-x86_64.AppImage"
+          test -s "release-assets/PyGPT-${VERSION}-aarch64.AppImage"
+          ls -lh release-assets/*.AppImage
+
+      - name: Create SHA256SUMS
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+          cd release-assets
+
+          sha256sum \
+            "PyGPT-${VERSION}-x86_64.AppImage" \
+            "PyGPT-${VERSION}-aarch64.AppImage" \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          gh release upload "$TAG" release-assets/SHA256SUMS --clobber

@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.29 21:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 import copy
@@ -15,18 +15,26 @@ import shutil
 import json
 import ssl
 import time
-from typing import Tuple
+from typing import Optional, Tuple
 import locale
 
+from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 
 from PySide6.QtCore import QObject, Signal, Slot, QRunnable
 from packaging.version import parse as parse_version, Version
 
+from pygpt_net.core.qt import safe_emit
+from pygpt_net.core.auto_updater import AutoUpdater, UpdatePayload
 from pygpt_net.utils import trans
+
+from pygpt_net.provider.core.notepad.db_sqlite import DbSqliteProvider
 
 
 class Updater(QObject):
+
+    STARTUP_FAIL_MSG = ">>> CRITICAL <<< Failed to patch {file}. Configuration may be corrupted, trying to launch..."
+
     def __init__(self, window=None):
         """
         Updater core (config data patcher)
@@ -36,9 +44,16 @@ class Updater(QObject):
         super(Updater, self).__init__()
         self.window = window
         self.thanks = None  # cache
+        self.auto = AutoUpdater(window)
+        # True only for the one patch pass performed during real application
+        # startup. Profile/workdir reloads call patch() again later and must not
+        # be treated as application updates.
+        self._startup_patch_pending = True
+        self._is_startup_patch = False
 
     def patch(self):
-        """Patch config data to current version"""
+        """Patch config data to current version."""
+        self._is_startup_patch = self._startup_patch_pending
         try:
             version = self.get_app_version()
 
@@ -56,6 +71,9 @@ class Updater(QObject):
         except Exception as e:
             self.window.core.debug.log(e)
             print("Failed to patch config data!")
+        finally:
+            self._startup_patch_pending = False
+            self._is_startup_patch = False
 
     def migrate_db(self):
         """Migrate database"""
@@ -67,12 +85,70 @@ class Updater(QObject):
 
     def patch_config(self, version: Version):
         """
-        Migrate config to current app version
+        Migrate config to current app version and remember a real app upgrade.
+
+        The update marker is created only during the initial startup patch.
+        Profile creation/switching also runs the patcher, but those reload passes
+        must never trigger the post-startup "What's new" dialog.
 
         :param version: current app version
         """
-        if self.window.core.config.patch(version):
+        config = self.window.core.config
+        data = config.all()
+        meta = data.get("__meta__") if isinstance(data, dict) else None
+        previous = meta.get("version") if isinstance(meta, dict) else None
+        version_changed = False
+
+        if previous:
+            try:
+                version_changed = parse_version(str(previous)) < version
+            except Exception:
+                version_changed = False
+
+        config_created = bool(getattr(config.provider, "config_created", False))
+        marker_changed = False
+        if version_changed and self._is_startup_patch and not config_created:
+            # Persist this in the profile config so a crash before the UI becomes
+            # ready does not lose the notification. It is removed after the
+            # changelog is opened successfully.
+            config.set("app_updated", True)
+            marker_changed = True
+        elif not self._is_startup_patch and "app_updated" in data:
+            # Imported/switched profiles may contain a stale transient marker. A
+            # profile reload is never an application update, so discard it.
+            config.data.pop("app_updated", None)
+            marker_changed = True
+
+        try:
+            migrated = config.patch(version)
+        except Exception as e:
+            self.throw_startup_error(e, "config.json")
+            migrated = False
+
+        # A release may only bump the version and have no config migration. In
+        # that case save explicitly so __meta__.version (and app_updated, when
+        # applicable) still advance to the running application version. Also
+        # persist removal of stale markers during profile reloads.
+        if (version_changed or marker_changed) and not migrated:
+            config.save()
+
+        if migrated:
             print("Migrated config. [OK]")
+
+    def show_updated_changelog(self) -> bool:
+        """Show the changelog once after a real application update."""
+        config = self.window.core.config
+        if not bool(config.get("app_updated", False)):
+            return False
+
+        self.window.controller.dialogs.info.toggle("changelog")
+
+        # Clear only after the dialog was opened successfully. The QLabel keeps
+        # its startup visibility state for the current session, while the next
+        # launch starts cleanly.
+        config.data.pop("app_updated", None)
+        config.save()
+        return True
 
     def patch_models(self, version: Version):
         """
@@ -80,8 +156,11 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.models.patch(version):
-            print("Migrated models. [OK]")
+        try:
+            if self.window.core.models.patch(version):
+                print("Migrated models. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "models.json")
 
     def patch_presets(self, version: Version):
         """
@@ -89,8 +168,11 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.presets.patch(version):
-            print("Migrated presets. [OK]")
+        try:
+            if self.window.core.presets.patch(version):
+                print("Migrated presets. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "presets")
 
     def patch_ctx(self, version: Version):
         """
@@ -98,8 +180,11 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.ctx.patch(version):
-            print("Migrated ctx. [OK]")
+        try:
+            if self.window.core.ctx.patch(version):
+                print("Migrated ctx. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "ctx")
 
     def patch_assistants(self, version: Version):
         """
@@ -107,8 +192,11 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.assistants.patch(version):
-            print("Migrated assistants. [OK]")
+        try:
+            if self.window.core.assistants.patch(version):
+                print("Migrated assistants. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "assistants")
 
     def patch_attachments(self, version: Version):
         """
@@ -116,8 +204,11 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.attachments.patch(version):
-            print("Migrated attachments. [OK]")
+        try:
+            if self.window.core.attachments.patch(version):
+                print("Migrated attachments. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "attachments")
 
     def patch_indexes(self, version: Version):
         """
@@ -125,8 +216,11 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.idx.patch(version):
-            print("Migrated indexes. [OK]")
+        try:
+            if self.window.core.idx.patch(version):
+                print("Migrated indexes. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "indexes")
 
     def patch_notepad(self, version: Version):
         """
@@ -134,8 +228,22 @@ class Updater(QObject):
 
         :param version: current app version
         """
-        if self.window.core.notepad.patch(version):
-            print("Migrated notepad. [OK]")
+        try:
+            if DbSqliteProvider(self.window).patch(version):
+                print("Migrated notepad. [OK]")
+        except Exception as e:
+            self.throw_startup_error(e, "notepad")
+
+    def throw_startup_error(self, exception: Exception, file: str):
+        """
+        Log and print startup error
+
+        :param exception: exception
+        :param file: file name
+        """
+        self.window.core.debug.log(exception)
+        print(exception)
+        print(self.STARTUP_FAIL_MSG.format(file=file))
 
     def patch_dir(
             self,
@@ -186,30 +294,33 @@ class Updater(QObject):
         except Exception as e:
             self.window.core.debug.log(e)
 
-    def patch_css(
+    def start_auto_update(
             self,
-            filename: str = "",
-            force: bool = False
-    ):
-        """
-        Patch css file
+            version: str,
+            build: str = "",
+            changelog: str = "",
+            download_windows: str = "",
+            download_linux: str = "",
+            download_appimage: str = "",
+    ) -> bool:
+        """Start the automatic update procedure for the running distribution."""
+        payload = UpdatePayload(
+            version=str(version or ""),
+            build=str(build or ""),
+            changelog=str(changelog or ""),
+            download_windows=str(download_windows or ""),
+            download_linux=str(download_linux or ""),
+            download_appimage=str(download_appimage or ""),
+        )
+        return self.auto.start(payload)
 
-        :param filename: file name
-        :param force: force update
-        """
-        try:
-            # file
-            dst = os.path.join(self.window.core.config.path, 'css', filename)
-            if not os.path.exists(dst) or force:
-                src = os.path.join(self.window.core.config.get_app_path(), 'data', 'css', filename)
-                # make backup of old file
-                if os.path.exists(dst):
-                    shutil.copyfile(dst, dst + '.backup')
-                    print("Backup css file: {}.".format(dst + '.backup'))
-                shutil.copyfile(src, dst)
-                print("Patched css file: {}.".format(dst))
-        except Exception as e:
-            self.window.core.debug.log(e)
+    def can_auto_update(self) -> bool:
+        """Return True when the current distribution supports in-app updates."""
+        return self.auto.can_update()
+
+    def get_auto_update_type(self) -> str:
+        """Return the detected automatic updater distribution type."""
+        return self.auto.get_type()
 
     def get_app_version(self) -> Version:
         """
@@ -219,13 +330,21 @@ class Updater(QObject):
         """
         return parse_version(self.window.meta['version'])
 
-    def get_updater_url(self) -> str:
+    def get_updater_url(self, event: Optional[str] = None) -> str:
         """
         Get the app updates info url.
 
+        :param event: optional updater event name
         :return: updater url
         """
-        return self.window.meta['website'] + "/api/version?v=" + str(self.window.meta['version'])
+        params = [("v", str(self.window.meta['version']))]
+        if event:
+            params.append(("event", event))
+        params.extend([
+            ("platform", self.window.core.platforms.get_as_string(env_suffix=False)),
+            ("app_type", self.window.core.platforms.get_app_type()),
+        ])
+        return self.window.meta['website'] + "/api/version?" + urlencode(params)
 
     def get_thanks(self) -> Tuple[str, str, str]:
         """
@@ -262,13 +381,14 @@ class Updater(QObject):
             return self.get_thanks()
         return self.thanks
 
-    def check_silent(self) -> Tuple[bool, str, str, str, str, str, str]:
+    def check_silent(self, event: Optional[str] = None) -> Tuple[bool, str, str, str, str, str, str]:
         """
         Check version in background
 
+        :param event: optional updater event name
         :return: (is_new, newest_version, newest_build, changelog, download_windows, download_linux, download_appimage)
         """
-        url = self.get_updater_url()
+        url = self.get_updater_url(event)
         is_new = False
         newest_version = ""
         newest_build = ""
@@ -333,7 +453,6 @@ class Updater(QObject):
 
         except Exception as e:
             self.window.core.debug.log(e)
-            print("Failed to check for updates")
 
         return is_new, newest_version, newest_build, changelog, download_windows, download_linux, download_appimage
 
@@ -356,7 +475,7 @@ class Updater(QObject):
         :return: True if force show version dialog
         """
         print("Checking for updates...")
-        is_new, version, build, changelog, download_windows, download_linux, download_appimage = self.check_silent()
+        is_new, version, build, changelog, download_windows, download_linux, download_appimage = self.check_silent("manual")
         if is_new or force:
             self.show_version_dialog(
                 version,
@@ -464,22 +583,30 @@ class Updater(QObject):
             True
         )
 
-    def run_check(self, force: bool = False):
+    def run_check(self, force: bool = False, on_finished=None, event: Optional[str] = "ping", quiet: bool = False):
         """
         Run check for updates in background
 
         :param force: force show version dialog
+        :param on_finished: optional callback invoked after the background check finishes
+        :param event: updater event name
+        :param quiet: suppress console output from the background worker
         """
         worker = UpdaterWorker()
         worker.window = self.window
         worker.checker = self.check_silent
         worker.force = force
+        worker.event = event
+        worker.quiet = quiet
         worker.signals.version_changed.connect(self.handle_new_version)
+        if on_finished is not None:
+            worker.signals.finished.connect(on_finished)
         self.window.threadpool.start(worker)
 
 
 class UpdaterSignals(QObject):
     version_changed = Signal(str, str, str, str, str, str)
+    finished = Signal()
 
 
 class UpdaterWorker(QRunnable):
@@ -492,6 +619,8 @@ class UpdaterWorker(QRunnable):
         self.window = None
         self.checker = None
         self.force = False
+        self.event = None
+        self.quiet = False
 
     @Slot()
     def run(self):
@@ -506,13 +635,13 @@ class UpdaterWorker(QRunnable):
             if last_checked is not None and last_checked != "":
                 parsed_prev_checked = parse_version(last_checked)
 
-            if self.force:
+            if self.force and not self.quiet:
                 print("Checking for updates...")
 
-            is_new, version, build, changelog, download_windows, download_linux, download_appimage = self.checker()
+            is_new, version, build, changelog, download_windows, download_linux, download_appimage = self.checker(self.event)
             if is_new:
                 if self.force or (parsed_prev_checked is None or parsed_prev_checked < parse_version(version)):
-                    self.signals.version_changed.emit(
+                    safe_emit(self.signals, "version_changed", 
                         version,
                         build,
                         changelog,
@@ -521,14 +650,17 @@ class UpdaterWorker(QRunnable):
                         download_appimage
                     )
                 return
-            if self.force:
+            if self.force and not self.quiet:
                 print("No updates available.")
 
         except Exception as e:
             self.window.core.debug.log(e)
-            print("Failed to check for updates")
+            if not self.quiet:
+                print("Failed to check for updates")
 
         finally:
+            if self.signals is not None:
+                safe_emit(self.signals, "finished")
             self.cleanup()
 
     def cleanup(self):

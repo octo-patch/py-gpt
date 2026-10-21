@@ -6,18 +6,16 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.27 17:00:00                  #
+# Updated Date: 2026.08.12 14:00:00                  #
 # ================================================== #
 
-from dataclasses import dataclass
-from typing import Dict, Any, Tuple, Optional, List
+from __future__ import annotations
+import re
+from typing import Dict, Any, Tuple, Optional, List, TYPE_CHECKING
 
-from agents import (
-    Agent as OpenAIAgent,
-    Runner,
-    RunConfig,
-    TResponseInputItem,
-)
+if TYPE_CHECKING:
+    from agents import Agent as OpenAIAgent, TResponseInputItem
+    from .agent_planner_models import Plan, PlanRefinement, SubTask
 
 from pygpt_net.core.agents.bridge import ConnectionContext
 from pygpt_net.core.bridge import BridgeContext
@@ -30,35 +28,23 @@ from pygpt_net.item.ctx import CtxItem
 from pygpt_net.item.model import ModelItem
 from pygpt_net.item.preset import PresetItem
 
-from pygpt_net.provider.api.openai.agents.client import get_custom_model_provider, set_openai_env
-from pygpt_net.provider.api.openai.agents.remote_tools import append_tools
-from pygpt_net.provider.api.openai.agents.response import StreamHandler
-from pygpt_net.provider.api.openai.agents.experts import get_experts
 from pygpt_net.utils import trans
 
 from ..base import BaseAgent
 
 
 # ---------- Structured types to mirror the LlamaIndex Planner ----------
-@dataclass
-class SubTask:
-    name: str
-    input: str
-    expected_output: str
-    dependencies: List[str]
+# Use Pydantic models here rather than stdlib dataclasses. In openai-agents 0.6.4
+# dataclasses are wrapped under a top-level ``response`` key by AgentOutputSchema,
+# while BaseModel subclasses are emitted as the JSON object directly. Keeping the
+# schema shape identical to the prompt avoids a conflicting structured-output contract.
 
 
-@dataclass
-class Plan:
-    sub_tasks: List[SubTask]
 
 
-@dataclass
-class PlanRefinement:
-    is_done: bool
-    reason: Optional[str]
-    plan: Optional[Plan]
 
+
+__all__ = ["Agent", "SubTask", "Plan", "PlanRefinement"]
 
 class Agent(BaseAgent):
     # System prompts used as templates, exposed in options (planner.initial_prompt, refine.prompt).
@@ -104,7 +90,7 @@ Completion criteria (ALL must be true to set is_done=true):
 If ANY of the above is false, set is_done=false.
 
 Update policy:
-- If the remaining sub-tasks are already reasonable and correctly ordered, do not propose changes: set is_done=false and omit "plan".
+- If the remaining sub-tasks are already reasonable and correctly ordered, do not propose changes: set is_done=false and set "plan" to null.
 - Only propose a new "plan" if you need to REPLACE the "Remaining Sub-Tasks" (e.g., wrong order, missing critical steps, or new info from completed outputs).
 - Do NOT repeat any completed sub-task. New sub-tasks must replace only the "Remaining Sub-Tasks".
 
@@ -141,7 +127,7 @@ Overall Task: {task}
     PROMPT = (
         "You are an execution agent. Follow each sub-task strictly and use the available tools to take actions. "
         "Do not claim that you cannot access files or the web; instead, invoke the appropriate tool. "
-        "For local files prefer the sequence: cwd -> find (pattern, path, recursive=true) -> read_file(path). "
+        "For local files prefer the sequence: fs_cwd -> fs_find (pattern, path, recursive=true) -> fs_read_file(path). "
         "Return only the final output unless explicitly asked for intermediate thoughts."
     )
 
@@ -153,7 +139,24 @@ Overall Task: {task}
         self.name = "Planner"
         self._memory_char_limit = 8000  # consistent with the LlamaIndex workflow
 
+    # Only these placeholders are substituted. This intentionally does NOT use
+    # str.format(), because planner prompts contain literal JSON braces.
+    _PROMPT_VAR_RE = re.compile(
+        r"\{(memory_context|tools_str|task|completed_outputs|remaining_sub_tasks)\}"
+    )
+
     # ---------- Helpers: planning/execution parity with LlamaIndex + bridge persistence ----------
+
+    def _render_prompt(self, template: str, **values: Any) -> str:
+        """Render known planner placeholders without interpreting literal JSON braces."""
+        source = template or ""
+
+        def repl(match: re.Match) -> str:
+            key = match.group(1)
+            value = values.get(key, match.group(0))
+            return "" if value is None else str(value)
+
+        return self._PROMPT_VAR_RE.sub(repl, source)
 
     def _truncate(self, text: str, limit: int) -> str:
         if not text or not limit or limit <= 0:
@@ -267,7 +270,7 @@ Overall Task: {task}
         # Small, generic tool usage hint keeps the model from refusing actions.
         tool_hint = (
             "Use tools to take actions. For file operations use: "
-            "'cwd' -> 'find' (pattern, path, recursive=true) -> 'read_file(path)'."
+            "'fs_cwd' -> 'fs_find' (pattern, path, recursive=true) -> 'fs_read_file(path)'."
         )
 
         if ctx_text:
@@ -334,6 +337,10 @@ Overall Task: {task}
         :param kwargs: keyword arguments
         :return: Agent provider instance
         """
+        from agents import Agent as OpenAIAgent
+        from pygpt_net.provider.api.openai.agents.client import append_reasoning_model_settings
+        from pygpt_net.provider.api.openai.agents.remote_tools import append_tools
+
         context = kwargs.get("context", BridgeContext())
         preset = context.preset
         # Keep a stable display name; fallback to translated 'Executor' if no preset
@@ -345,7 +352,10 @@ Overall Task: {task}
 
         # Use prompt from options if provided; fallback to internal default.
         step_prompt = self.get_option(preset, "step", "prompt") if preset else None
-        base_instructions = step_prompt or self.PROMPT
+        base_instructions = self.append_system_prompt_extra(
+            step_prompt or self.PROMPT,
+            kwargs,
+        )
 
         allow_local_tools = bool(kwargs.get("allow_local_tools", False))
         allow_remote_tools = bool(kwargs.get("allow_remote_tools", False))
@@ -381,6 +391,8 @@ Overall Task: {task}
         except Exception:
             pass
 
+        cfg["instructions"] = self.append_security_rule(cfg.get("instructions", ""))
+        append_reasoning_model_settings(cfg, window, model)
         return OpenAIAgent(**cfg)
 
     def get_planner(
@@ -391,14 +403,24 @@ Overall Task: {task}
             tools: list,
             allow_local_tools: bool = False,
             allow_remote_tools: bool = False,
+            system_prompt_extra: str = "",
     ) -> OpenAIAgent:
         """
         Return Agent provider instance producing a structured Plan.
         """
+        from .agent_planner_models import Plan
+
+        from agents import Agent as OpenAIAgent
+        from pygpt_net.provider.api.openai.agents.client import append_reasoning_model_settings
+        from pygpt_net.provider.api.openai.agents.remote_tools import append_tools
+
         kwargs = {
             "name": "StructuredPlanner",
             # Minimal instructions; the full template is injected as user content.
-            "instructions": "Return a JSON object matching the provided schema.",
+            "instructions": self.append_system_prompt_extra(
+                "Return a JSON object matching the provided schema.",
+                {"system_prompt_extra": system_prompt_extra},
+            ),
             "model": window.core.agents.provider.get_openai_model(model),
             "output_type": Plan,
         }
@@ -411,6 +433,7 @@ Overall Task: {task}
             allow_remote_tools=allow_remote_tools,
         )
         kwargs.update(tool_kwargs)  # update kwargs with tools
+        append_reasoning_model_settings(kwargs, window, model)
         return OpenAIAgent(**kwargs)
 
     def get_refiner(
@@ -421,13 +444,23 @@ Overall Task: {task}
             tools: list,
             allow_local_tools: bool = False,
             allow_remote_tools: bool = False,
+            system_prompt_extra: str = "",
     ) -> OpenAIAgent:
         """
         Return Agent provider instance producing a structured PlanRefinement.
         """
+        from .agent_planner_models import PlanRefinement
+
+        from agents import Agent as OpenAIAgent
+        from pygpt_net.provider.api.openai.agents.client import append_reasoning_model_settings
+        from pygpt_net.provider.api.openai.agents.remote_tools import append_tools
+
         kwargs = {
             "name": "PlanRefiner",
-            "instructions": "Refine remaining plan steps and return a strict JSON object as instructed.",
+            "instructions": self.append_system_prompt_extra(
+                "Refine remaining plan steps and return a strict JSON object as instructed.",
+                {"system_prompt_extra": system_prompt_extra},
+            ),
             "model": window.core.agents.provider.get_openai_model(model),
             "output_type": PlanRefinement,
         }
@@ -440,6 +473,7 @@ Overall Task: {task}
             allow_remote_tools=allow_remote_tools,
         )
         kwargs.update(tool_kwargs)
+        append_reasoning_model_settings(kwargs, window, model)
         return OpenAIAgent(**kwargs)
 
     async def run(
@@ -466,6 +500,13 @@ Overall Task: {task}
         :param use_partial_ctx: Use partial ctx per cycle
         :return: Current ctx, final output, last response ID
         """
+        from .agent_planner_models import Plan, PlanRefinement, SubTask
+
+        from agents import Runner, RunConfig
+        from pygpt_net.provider.api.openai.agents.client import get_custom_model_provider, set_openai_env
+        from pygpt_net.provider.api.openai.agents.response import StreamHandler
+        from pygpt_net.provider.api.openai.agents.experts import get_experts
+
         final_output = ""
         response_id = None
         model = agent_kwargs.get("model", ModelItem())
@@ -474,6 +515,7 @@ Overall Task: {task}
         max_steps = int(agent_kwargs.get("max_iterations", 10))
         tools = agent_kwargs.get("function_tools", [])
         preset = context.preset
+        system_prompt_extra = self.get_system_prompt_extra(agent_kwargs)
 
         # add experts
         experts = get_experts(
@@ -481,18 +523,20 @@ Overall Task: {task}
             preset=preset,
             verbose=verbose,
             tools=tools,
+            system_prompt_extra=self.get_system_prompt_extra(agent_kwargs),
         )
         if experts:
             agent_kwargs["handoffs"] = experts
 
-        # Executor must have access to the same tool set as planner/refiner.
-        # If not explicitly provided, inherit allow_* flags from planner options.
+        # Executor/step has its own tool policy. Explicit runtime overrides still
+        # win, otherwise use the dedicated preset flags instead of inheriting the
+        # planner agent's tool permissions.
         exec_allow_local_tools = agent_kwargs.get("allow_local_tools")
         exec_allow_remote_tools = agent_kwargs.get("allow_remote_tools")
         if exec_allow_local_tools is None:
-            exec_allow_local_tools = bool(self.get_option(preset, "planner", "allow_local_tools"))
+            exec_allow_local_tools = bool(self.get_option(preset, "step", "allow_local_tools"))
         if exec_allow_remote_tools is None:
-            exec_allow_remote_tools = bool(self.get_option(preset, "planner", "allow_remote_tools"))
+            exec_allow_remote_tools = bool(self.get_option(preset, "step", "allow_remote_tools"))
 
         # executor agent (FunctionAgent equivalent)
         agent_exec_kwargs = dict(agent_kwargs)
@@ -501,14 +545,12 @@ Overall Task: {task}
         agent = self.get_agent(window, agent_exec_kwargs)
 
         # options
-        planner_model_name = self.get_option(preset, "planner", "model")
-        planner_model = window.core.models.get(planner_model_name) if planner_model_name else agent_kwargs.get("model",
-                                                                                                               ModelItem())
+        planner_model = self.resolve_model_option(window, preset, "planner", model)
         planner_allow_local_tools = bool(self.get_option(preset, "planner", "allow_local_tools"))
         planner_allow_remote_tools = bool(self.get_option(preset, "planner", "allow_remote_tools"))
         planner_prompt_tpl = self.get_option(preset, "planner", "initial_prompt") or self.DEFAULT_INITIAL_PLAN_PROMPT
 
-        refine_model_name = self.get_option(preset, "refine", "model") or planner_model_name
+        refine_model = self.resolve_model_option(window, preset, "refine", model)
         refine_allow_local_tools = bool(self.get_option(preset, "refine", "allow_local_tools"))
         refine_allow_remote_tools = bool(self.get_option(preset, "refine", "allow_remote_tools"))
         refine_prompt_tpl = self.get_option(preset, "refine", "prompt") or self.DEFAULT_PLAN_REFINE_PROMPT
@@ -541,9 +583,11 @@ Overall Task: {task}
             tools=tools,
             allow_local_tools=planner_allow_local_tools,
             allow_remote_tools=planner_allow_remote_tools,
+            system_prompt_extra=system_prompt_extra,
         )
 
-        plan_prompt = planner_prompt_tpl.format(
+        plan_prompt = self._render_prompt(
+            planner_prompt_tpl,
             memory_context=memory_context,
             tools_str=tools_str,
             task=query,
@@ -553,7 +597,8 @@ Overall Task: {task}
         try:
             planner_result = await Runner.run(planner, plan_input_items)
             plan_obj: Optional[Plan] = planner_result.final_output  # type: ignore
-        except Exception:
+        except Exception as ex:
+            window.core.debug.log(f"OpenAI Planner: failed to create structured plan: {ex}")
             plan_obj = None
 
         if not plan_obj or not getattr(plan_obj, "sub_tasks", None):
@@ -610,6 +655,8 @@ Overall Task: {task}
         prev_rid: Optional[str] = previous_response_id
 
         i = 0
+        refinement_count = 0
+        max_refinements = max(1, max_steps)
         while i < len(plan_sub_tasks):
             if bridge.stopped():
                 bridge.on_stop(ctx)
@@ -678,12 +725,18 @@ Overall Task: {task}
             is_last_subtask = (i + 1 == len(plan_sub_tasks))
             will_refine = (refine_after_each and not is_last_subtask)
             if use_partial_ctx:
+                final_subtask_block = (is_last_subtask and not will_refine)
+                persisted_output = sub_answer if sub_answer else header_block.strip()
                 ctx = bridge.on_next_ctx(
                     ctx=ctx,
-                    input="",
-                    output=sub_answer if sub_answer else header_block.strip(),
+                    # On the terminal block, matching input/output tells the shared OpenAI
+                    # workflow bridge to finalize the current context instead of creating
+                    # a trailing empty partial context. The value is only a finish sentinel
+                    # here; on_next_ctx does not overwrite the current item's input.
+                    input=persisted_output if final_subtask_block else "",
+                    output=persisted_output,
                     response_id=sub_rid,
-                    finish=(is_last_subtask and not will_refine),
+                    finish=final_subtask_block,
                     stream=stream,
                 )
                 if stream:
@@ -697,7 +750,8 @@ Overall Task: {task}
 
             # Optional legacy-style refine after each sub-task (if there are remaining ones)
             i += 1
-            if refine_after_each and i < len(plan_sub_tasks):
+            if refine_after_each and i < len(plan_sub_tasks) and refinement_count < max_refinements:
+                refinement_count += 1
                 remaining = plan_sub_tasks[i:]
                 refine_label = self._agent_label("refine", index=i, total=len(plan_sub_tasks))
 
@@ -710,21 +764,22 @@ Overall Task: {task}
                 # Build refine prompt
                 completed_text = self._format_completed(completed)
                 remaining_text = self._format_subtasks(remaining)
-                refine_prompt = refine_prompt_tpl.format(
+                refine_prompt = self._render_prompt(
+                    refine_prompt_tpl,
                     memory_context=memory_context,
                     tools_str=tools_str,
                     completed_outputs=completed_text,
                     remaining_sub_tasks=remaining_text,
                     task=query,
                 )
-                model_refiner = window.core.models.get(refine_model_name) if refine_model_name else planner_model
                 refiner = self.get_refiner(
                     window=window,
-                    model=model_refiner,
+                    model=refine_model,
                     preset=preset,
                     tools=tools,
                     allow_local_tools=refine_allow_local_tools,
                     allow_remote_tools=refine_allow_remote_tools,
+                    system_prompt_extra=system_prompt_extra,
                 )
 
                 refinement: Optional[PlanRefinement] = None
@@ -733,7 +788,8 @@ Overall Task: {task}
                     refinement_result = await Runner.run(refiner, [{"role": "user", "content": refine_prompt}])
                     refinement = refinement_result.final_output  # type: ignore
                     refine_rid = getattr(refinement_result, "last_response_id", "") or ""
-                except Exception:
+                except Exception as ex:
+                    window.core.debug.log(f"OpenAI Planner: failed to refine structured plan: {ex}")
                     refinement = None
 
                 if refinement is None:
@@ -765,7 +821,8 @@ Overall Task: {task}
                     if use_partial_ctx:
                         ctx = bridge.on_next_ctx(
                             ctx=ctx,
-                            input="",
+                            # Finalize this refine block in-place; avoid an empty terminal ctx.
+                            input=refine_display,
                             output=refine_display,
                             response_id=refine_rid or (response_id or ""),
                             finish=True,
@@ -832,6 +889,18 @@ Overall Task: {task}
                         "description": trans("agent.planner.step.prompt.desc"),
                         "default": self.PROMPT,
                     },
+                    "allow_local_tools": {
+                        "type": "bool",
+                        "label": trans("agent.option.tools.local"),
+                        "description": trans("agent.option.tools.local.desc"),
+                        "default": True,
+                    },
+                    "allow_remote_tools": {
+                        "type": "bool",
+                        "label": trans("agent.option.tools.remote"),
+                        "description": trans("agent.option.tools.remote.desc"),
+                        "default": True,
+                    },
                 }
             },
             "planner": {
@@ -841,7 +910,12 @@ Overall Task: {task}
                         "label": trans("agent.option.model"),
                         "type": "combo",
                         "use": "models",
-                        "default": "gpt-4o",
+                        "default": "gpt-5.6-luna",
+                    },
+                    "model_overwrite": {
+                        "label": trans("agent.option.model.overwrite"),
+                        "type": "bool",
+                        "default": False,
                     },
                     "initial_prompt": {
                         "type": "textarea",
@@ -870,7 +944,12 @@ Overall Task: {task}
                         "label": trans("agent.option.model"),
                         "type": "combo",
                         "use": "models",
-                        "default": "gpt-4o",
+                        "default": "gpt-5.6-luna",
+                    },
+                    "model_overwrite": {
+                        "label": trans("agent.option.model.overwrite"),
+                        "type": "bool",
+                        "default": False,
                     },
                     "prompt": {
                         "type": "textarea",
@@ -899,3 +978,16 @@ Overall Task: {task}
                 }
             },
         }
+
+def __getattr__(name):
+    # Preserve the previous module-level schema imports without loading Pydantic
+    # during provider registration.
+    if name in {"SubTask", "Plan", "PlanRefinement"}:
+        from .agent_planner_models import Plan, PlanRefinement, SubTask
+        return {
+            "SubTask": SubTask,
+            "Plan": Plan,
+            "PlanRefinement": PlanRefinement,
+        }[name]
+    raise AttributeError(name)
+

@@ -6,12 +6,13 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2024.02.01 18:00:00                  #
+# Updated Date: 2026.09.25 20:00:00                  #
 # ================================================== #
 
 import os
 
-from PySide6.QtWidgets import QPlainTextEdit, QVBoxLayout, QLabel
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPlainTextEdit, QVBoxLayout, QLabel, QPushButton, QSizePolicy
 
 from pygpt_net.ui.widget.dialog.info import InfoDialog
 from pygpt_net.utils import trans
@@ -29,6 +30,7 @@ class Changelog:
     def setup(self):
         """Setup change log dialog"""
         id = 'changelog'
+        self.window.ui.dialog['info.' + id] = InfoDialog(self.window, id)
 
         txt = ''
         try:
@@ -43,11 +45,33 @@ class Changelog:
         textarea.setReadOnly(True)
         textarea.setPlainText(txt)
 
-        self.window.ui.nodes['dialog.changelog.label'] = QLabel(trans("dialog.changelog.title"))
-        layout = QVBoxLayout()
-        layout.addWidget(self.window.ui.nodes['dialog.changelog.label'])
-        layout.addWidget(textarea)
+        # self.window.ui.nodes['dialog.changelog.label'] = QLabel(trans("dialog.changelog.title"))
 
-        self.window.ui.dialog['info.' + id] = InfoDialog(self.window, id)
+        updated = QLabel(
+            trans("dialog.changelog.updated").format(version=self.window.meta["version"]),
+            self.window.ui.dialog['info.' + id],
+        )
+        updated.setAlignment(Qt.AlignCenter)
+        updated.setWordWrap(True)
+        updated.setContentsMargins(6, 5, 6, 5)
+        font = updated.font()
+        font.setBold(True)
+        updated.setFont(font)
+        updated.setVisible(bool(self.window.core.config.get("app_updated", False)))
+        self.window.ui.nodes['dialog.changelog.updated'] = updated
+
+        close_btn = QPushButton(trans("action.close"))
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        close_btn.clicked.connect(
+            lambda checked=False: self.window.ui.dialog['info.' + id].close()
+        )
+
+        layout = QVBoxLayout()
+        layout.addWidget(updated)
+        # layout.addWidget(self.window.ui.nodes['dialog.changelog.label'], alignment=Qt.AlignCenter)
+        layout.addWidget(textarea)
+        layout.addWidget(close_btn)
+
         self.window.ui.dialog['info.' + id].setLayout(layout)
         self.window.ui.dialog['info.' + id].setWindowTitle(trans("dialog.changelog.title"))

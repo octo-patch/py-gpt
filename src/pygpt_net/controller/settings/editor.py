@@ -6,13 +6,12 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.26 12:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 import copy
+import json
 from typing import Optional, Any, Dict
-
-from PySide6.QtCore import QTimer
 
 from pygpt_net.core.events import Event
 from pygpt_net.utils import trans
@@ -53,7 +52,6 @@ class Editor:
         self.window.ui.add_hook("update.config.zoom", self.hook_update)
         self.window.ui.add_hook("update.config.vision.capture.enabled", self.hook_update)
         self.window.ui.add_hook("update.config.vision.capture.auto", self.hook_update)
-        self.window.ui.add_hook("update.config.ctx.records.limit", self.hook_update)
         self.window.ui.add_hook("update.config.ctx.records.separators", self.hook_update)
         self.window.ui.add_hook("update.config.ctx.records.groups.separators", self.hook_update)
         self.window.ui.add_hook("update.config.ctx.records.pinned.separators", self.hook_update)
@@ -77,7 +75,28 @@ class Editor:
                 if 'type' not in self.options[key]:
                     continue
                 options[key] = self.options[key]
-                options[key]['value'] = self.window.core.config.get(key)  # append current config value
+                if self.options[key].get('_provider_dynamic'):
+                    provider = self.window.core.llm.get(self.options[key].get('_provider'))
+                    if provider is not None:
+                        if '_remote_tool_key' in self.options[key]:
+                            tool_key = self.options[key]['_remote_tool_key']
+                            value = provider.get_remote_tool_config(tool_key)
+                            field = provider.get_remote_tools_schema()[tool_key]
+                            if field.get('value_type') == 'optional_bool':
+                                value = '' if value is None else str(bool(value)).lower()
+                            elif field.get('type') == 'textarea' and isinstance(value, (dict, list)):
+                                value = json.dumps(value, ensure_ascii=False, indent=2)
+                            elif field.get('type') == 'text' and isinstance(value, list):
+                                value = ', '.join(str(item) for item in value)
+                            elif value is None and field.get('type') in ('text', 'str', 'textarea'):
+                                value = ''
+                            options[key]['value'] = value
+                        else:
+                            options[key]['value'] = provider.get_config(self.options[key].get('_provider_key'))
+                    else:
+                        options[key]['value'] = self.options[key].get('value')
+                else:
+                    options[key]['value'] = self.window.core.config.get(key)  # append current config value
             self.window.controller.config.load_options('config', options)
 
     def load(self):
@@ -112,28 +131,43 @@ class Editor:
                 key=key, 
                 option=self.options[key],
             )
-            self.window.core.config.set(key, value)
+            if self.options[key].get('_provider_dynamic'):
+                provider = self.window.core.llm.get(self.options[key].get('_provider'))
+                if provider is not None:
+                    if '_remote_tool_key' in self.options[key]:
+                        provider.set_remote_tool_config(self.options[key]['_remote_tool_key'], value)
+                    else:
+                        provider.set_config(self.options[key].get('_provider_key'), value)
+            else:
+                self.window.core.config.set(key, value)
 
-            # update preset temperature
-            if key == "temperature":
-                preset_id = self.window.core.config.get('preset')
-                if preset_id is not None and preset_id != "":
-                    if preset_id in self.window.core.presets.items:
-                        preset = self.window.core.presets.items[preset_id]
-                        preset.temperature = value
-                        self.window.core.presets.save(preset_id)
-                        self.window.controller.mode.update_temperature(value)  # update current temperature
 
         if not self.window.core.config.get('layout.tray'):
             self.window.core.config.set('layout.tray.minimize', False)
 
         self.window.core.config.save()
+
+        if not self.window.core.config.get("security.computer.show_warning", True):
+            badge = getattr(self.window, "computer_use_badge", None)
+            if badge is not None:
+                badge.stop()
+
+        # Runtime OpenAI-compatible providers are created/removed immediately,
+        # without restarting the application.
+        if (self.before_config.get('api_custom_providers', [])
+                != self.window.core.config.get('api_custom_providers', [])):
+            self.window.core.llm.sync_custom(force=True)
+            self.refresh_llm_provider_choices()
+
         self.window.update_status(trans('info.settings.saved'))
         self.window.controller.ui.update_font_size()
         self.window.controller.ui.update()
 
         self.window.core.idx.sync()
         self.window.controller.idx.update()
+
+        if self.config_changed('layout.toolbox.placement'):
+            self.window.controller.toolbar.apply_toolbox_placement()
 
         # update layout if needed
         if self.config_changed('layout.density'):
@@ -144,7 +178,7 @@ class Editor:
             self.window.core.camera.install()
             self.window.core.image.install()
             self.window.core.filesystem.install()
-            self.window.controller.files.update_explorer()
+            self.window.tools.get("files").refresh()
 
         # switch log level in runtime
         if self.config_changed('log.level'):
@@ -157,6 +191,7 @@ class Editor:
 
         # update search result or ctx layout if needed
         if (self.config_changed('ctx.search_content') or
+                self.config_changed('ctx.records.limit') or
                 self.config_changed('ctx.records.folders.top') or
                 self.config_changed('ctx.records.groups.separators') or
                 self.config_changed('ctx.records.pinned.separators') or
@@ -185,7 +220,6 @@ class Editor:
 
         # update idx list
         if self.config_changed('llama.idx.list'):
-            self.window.controller.idx.settings.update_idx_choices()
             self.window.tools.get("indexer").reload()
 
         # update idx storage
@@ -199,36 +233,26 @@ class Editor:
         if self.config_changed('ctx.sources') or self.config_changed('ctx.audio'):
             self.window.controller.ctx.refresh()
 
-        if self.config_changed('agent.output.render.all'):
+        if (self.config_changed('agent.output.render.all') or
+                self.config_changed('ctx.tool_calls.show_json') or
+                self.config_changed('ctx.reasoning.show_realtime') or
+                self.config_changed('ctx.reasoning.hide_after_response')):
             self.window.controller.chat.render.reload()
+
+        # Response timestamps are now configured in Chats -> Render and apply
+        # only to the plain-text renderer. Refresh them immediately when that
+        # renderer is active; normal WebEngine output intentionally ignores
+        # this setting.
+        if (self.config_changed('output_timestamp')
+                and self.window.core.config.get('render.plain')):
+            self.window.controller.chat.common.apply_timestamp(
+                bool(self.window.core.config.get('output_timestamp')),
+                initialized=True,
+            )
 
         # update global shortcuts
         if self.config_changed('access.shortcuts'):
             self.window.setup_global_shortcuts()
-
-        # video: resolution
-        if self.config_changed('video.resolution'):
-            value = self.window.core.config.get('video.resolution')
-            self.window.core.config.set('video.resolution', value)
-            option = self.window.core.video.get_resolution_option()
-            self.window.controller.config.apply_value(
-                parent_id='global',
-                key='video.resolution',
-                option=option,
-                value=str(value),
-            )
-
-        # video: duration
-        if self.config_changed('video.duration'):
-            value = self.window.core.config.get('video.duration')
-            self.window.core.config.set('video.duration', value)
-            option = self.window.core.video.get_duration_option()
-            self.window.controller.config.apply_value(
-                parent_id='global',
-                key='video.duration',
-                option=option,
-                value=int(value) or 8,
-            )
 
         # update ENV
         self.window.core.config.setup_env()
@@ -239,6 +263,35 @@ class Editor:
         # dispatch on update event
         event = Event(Event.SETTINGS_CHANGED)
         self.window.dispatch(event, all=True)
+
+    def refresh_llm_provider_choices(self):
+        """Refresh provider comboboxes that may already exist in runtime dialogs."""
+        ui = self.window.ui
+        provider_keys = self.window.controller.config.placeholder.apply_by_id('llm_providers')
+
+        # Models editor: per-model provider and global provider filter.
+        model_cfg = ui.config.get('model', {})
+        widget = model_cfg.get('provider')
+        if widget is not None and hasattr(widget, 'set_keys'):
+            widget.set_keys(provider_keys)
+        widget = model_cfg.get('provider_global')
+        if widget is not None and hasattr(widget, 'set_keys'):
+            widget.set_keys([{"-": trans("list.all")}] + list(provider_keys))
+
+        # Model importer provider list.
+        importer_cfg = ui.config.get('models.importer', {})
+        widget = importer_cfg.get('provider')
+        if widget is not None and hasattr(widget, 'set_keys'):
+            option = self.window.controller.model.importer.get_providers_option()
+            widget.set_keys(option.get('keys', []))
+
+        # Preset editor model list. The widget is created before all built-in
+        # LLM providers are registered, and custom providers can also change at
+        # runtime, so always rebuild its grouped model choices here.
+        presets = getattr(self.window.controller, 'presets', None)
+        preset_editor = getattr(presets, 'editor', None) if presets is not None else None
+        if preset_editor is not None and hasattr(preset_editor, 'update_models_list'):
+            preset_editor.update_models_list()
 
     def config_changed(self, key: str) -> bool:
         """
@@ -308,6 +361,14 @@ class Editor:
             self.window.core.config.set(key, value)
             self.window.controller.chat.render.reload()
 
+        elif key in (
+                "ctx.tool_calls.show_json",
+                "ctx.reasoning.show_realtime",
+                "ctx.reasoning.hide_after_response",
+        ):
+            self.window.core.config.set(key, value)
+            self.window.controller.chat.render.reload()
+
         # update layout tooltips
         elif key == "layout.tooltips":
             self.window.core.config.set(key, value)
@@ -326,12 +387,6 @@ class Editor:
         elif key == "vision.capture.auto":
             self.window.core.config.set(key, value)
             self.window.ui.nodes['vision.capture.auto'].setChecked(value)
-
-        # update ctx limit
-        elif key.startswith('ctx.records.limit') and caller == "slider":
-            self.window.core.config.set(key, value)
-            self.window.controller.ctx.reset_loaded_total()  # reset paging
-            QTimer.singleShot(1000, lambda: self.window.controller.ctx.update(True, False))
 
         # update layout density
         elif key == "layout.density" and caller == "slider":
@@ -465,6 +520,27 @@ class Editor:
             )
             return
         self.window.core.settings.load_default_editor_app()
+
+    def load_agent_prompt_default(self, key: str, force: bool = False):
+        """Load a built-in Chat with Agents prompt into its custom textarea."""
+        widget = self.window.ui.config.get('config', {}).get(key)
+        if widget is None or not hasattr(widget, 'setPlainText'):
+            return
+
+        current = str(widget.toPlainText() or "").strip()
+        if current and not force:
+            self.window.ui.dialogs.confirm(
+                type='settings.agent.v2.prompt.defaults',
+                id=key,
+                msg=trans('settings.agent.v2.prompt.from_defaults.confirm'),
+            )
+            return
+
+        from pygpt_net.core.agents_v2.prompts import get_default_custom_prompt
+        default_prompt = get_default_custom_prompt(key)
+        if default_prompt:
+            widget.setPlainText(default_prompt)
+            widget.setFocus()
 
     def get_sections(self) -> Dict[str, dict]:
         """

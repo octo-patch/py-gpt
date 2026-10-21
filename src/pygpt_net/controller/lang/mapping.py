@@ -6,11 +6,12 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.21 01:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 from typing import Dict
 
+from pygpt_net.core.types import MODE_AGENT_LLAMA, MODE_AGENT_OPENAI
 from pygpt_net.utils import trans
 
 
@@ -24,15 +25,21 @@ class Mapping:
         self.window = window
         self.mapping = {}
 
+    @staticmethod
+    def _translate_mapping(value):
+        """Translate a legacy mapping value, optionally scoped to a domain."""
+        if isinstance(value, dict):
+            return trans(value.get("key", ""), domain=value.get("domain"))
+        return trans(value)
+
     def _apply_map(self, items, targets, getter_name: str, setter_name: str):
-        t = trans
         get = getattr
         for k, key in items.items():
             w = targets.get(k)
             if w is None:
                 continue
             try:
-                v = t(key)
+                v = self._translate_mapping(key)
                 getter = get(w, getter_name, None)
                 setter = get(w, setter_name, None)
                 if setter is None:
@@ -44,6 +51,25 @@ class Mapping:
                     except Exception as e:
                         pass
                 setter(v)
+            except Exception:
+                pass
+
+    def _apply_tooltips(self, items, targets):
+        """Apply translated tooltips, including nested toggle controls."""
+        for k, key in items.items():
+            widget = targets.get(k)
+            if widget is None:
+                continue
+            try:
+                value = self._translate_mapping(key)
+                widget.setToolTip(value)
+
+                # ToggleLabel stores the interactive checkbox in ``box``.
+                # A tooltip assigned directly to that child overrides the
+                # parent's tooltip, so it must be refreshed as well.
+                box = getattr(widget, 'box', None)
+                if box is not None and hasattr(box, 'setToolTip'):
+                    box.setToolTip(value)
             except Exception:
                 pass
 
@@ -60,8 +86,42 @@ class Mapping:
         self._apply_map(m['menu.text'], ui.menu, 'text', 'setText')
         self._apply_map(m['menu.tooltip'], ui.menu, 'toolTip', 'setToolTip')
         self._apply_map(m['dialog.title'], ui.dialog, 'windowTitle', 'setWindowTitle')
-        self._apply_map(m['tooltip'], ui.nodes, 'toolTip', 'setToolTip')
+        self._apply_tooltips(m['tooltip'], ui.nodes)
         self._apply_map(m['placeholder'], ui.nodes, 'placeholderText', 'setPlaceholderText')
+
+        # The toolbox system-prompt placeholder depends on the active mode,
+        # so refresh it explicitly on every runtime language change.
+        prompt = ui.nodes.get('preset.prompt')
+        if prompt is not None:
+            try:
+                mode = self.window.core.config.get('mode')
+                if mode in (MODE_AGENT_LLAMA, MODE_AGENT_OPENAI):
+                    prompt.setPlaceholderText(trans('toolbox.agent.preset.placeholder'))
+                else:
+                    prompt.setPlaceholderText(f"{trans('toolbox.prompt')}...")
+            except Exception:
+                pass
+
+        # External extensions info combines the general description and security
+        # warning into one centered paragraph at the bottom of the dialog.
+        extensions_info = ui.nodes.get("extensions.info")
+        if extensions_info is not None:
+            extensions_info.setText(f'{trans("extensions.help")} {trans("extensions.warning")}')
+
+        # Plain-text toggle uses a state-dependent tooltip, so refresh it
+        # after every locale mapping pass instead of assigning one static key.
+        try:
+            self.window.controller.chat.common.update_plain_view_tooltip()
+        except Exception:
+            pass
+
+        # The token-counter tooltip contains live values, so it cannot be
+        # represented by one static mapping key. Rebuild it after a locale
+        # switch to refresh both translated labels and current token counts.
+        try:
+            self.window.controller.ui.update_tokens()
+        except Exception:
+            pass
 
         tab_tools = self.window.controller.tools.get_tab_tools()
         t = trans
@@ -89,28 +149,12 @@ class Mapping:
         nodes = {}
 
         # output
-        nodes['output.timestamp'] = 'output.timestamp'
         nodes['output.edit'] = 'output.edit'
-        nodes['output.raw'] = 'output.raw'
 
-        # painter
-        nodes['painter.btn.brush'] = 'painter.mode.paint'
-        nodes['painter.btn.erase'] = 'painter.mode.erase'
-        nodes['painter.btn.capture'] = 'painter.btn.capture'
-        nodes['painter.btn.camera.capture'] = 'painter.btn.camera.capture'
-        nodes['painter.btn.clear'] = 'painter.btn.clear'
-
-        # calendar
-        nodes['filter.ctx.label.colors'] = 'filter.ctx.label.colors'
-        nodes['filter.ctx.label'] = 'filter.ctx.label'
-        nodes['filter.ctx.radio.all'] = 'filter.ctx.radio.all'
-        nodes['filter.ctx.radio.pinned'] = 'filter.ctx.radio.pinned'
-        nodes['filter.ctx.radio.indexed'] = 'filter.ctx.radio.indexed'
-        nodes['filter.ctx.counters.all'] = 'filter.ctx.counters.all'
 
         # context
         nodes['ctx.label'] = 'ctx.list.label'
-        nodes['ctx.new'] = 'ctx.new'
+        nodes['ctx.new'] = 'ctx.new.chat'
 
         # toolbox
         nodes['prompt.mode.label'] = 'toolbox.mode.label'
@@ -120,37 +164,24 @@ class Mapping:
         nodes['preset.experts.label'] = 'toolbox.experts.label'
         nodes['preset.use'] = 'preset.use'
         nodes['cmd.enabled'] = 'cmd.enabled'
-        nodes['toolbox.prompt.label'] = 'toolbox.prompt'
+        nodes['audio.auto_turn'] = 'audio.auto_turn'
         nodes["indexes.label"] = "toolbox.indexes.label"
-        nodes["llama_index.mode.label"] = "toolbox.llama_index.mode.label"
         nodes["agent.llama.loop.score.label"] = "toolbox.agent.llama.loop.score.label"
         nodes["agent.llama.loop.label"] = "toolbox.agent.llama.loop.label"
         nodes["agent.llama.loop.enabled"] = "toolbox.agent.llama.loop.enabled.label"
         nodes["agent.iterations.label"] = "toolbox.agent.iterations.label"
         nodes["agent.auto_stop"] = "toolbox.agent.auto_stop.label"
         nodes["agent.continue"] = "toolbox.agent.continue.label"
+        nodes["agent.v2.mode.label"] = "agent.v2.mode.label"
         nodes['layout.split'] = "layout.split"
+        nodes['completion.as_chat'] = "toolbox.completion.as_chat"
 
         # input
         nodes['input.label'] = 'input.label'
-        nodes['input.send_enter'] = 'input.radio.enter'
-        nodes['input.send_shift_enter'] = 'input.radio.enter_shift'
-        nodes['input.send_none'] = 'input.radio.none'
-        nodes['input.send_clear'] = 'input.send_clear'
-        nodes['input.send_btn'] = 'input.btn.send'
+        nodes['input.send_mode.enter'] = 'input.radio.enter'
+        nodes['input.send_mode.shift_enter'] = 'input.radio.enter_shift'
         nodes['input.update_btn'] = 'input.btn.update'
         nodes['input.cancel_btn'] = 'input.btn.cancel'
-        nodes['input.stop_btn'] = 'input.btn.stop'
-        nodes['input.stream'] = 'input.stream'
-        nodes['inline.vision'] = 'inline.vision'
-
-        # interpreter
-        nodes['interpreter.all'] = 'interpreter.all'
-        nodes['interpreter.auto_clear'] = 'interpreter.auto_clear'
-        nodes['interpreter.output_label'] = 'interpreter.edit_label.output'
-        nodes['interpreter.edit_label'] = 'interpreter.edit_label.edit'
-        nodes['interpreter.btn.clear'] = 'dialog.logger.btn.clear'
-        nodes['interpreter.btn.send'] = 'interpreter.btn.send'
 
         # assistants
         nodes['assistants.label'] = 'toolbox.assistants.label'
@@ -172,9 +203,6 @@ class Mapping:
         nodes['remote_store.btn.close'] = 'dialog.remote_store.btn.close'
         nodes['remote_store.hide_thread'] = 'remote_store.hide_threads'
 
-        # vision
-        nodes['inline.vision'] = 'inline.vision'
-
         # dialog: plugin settings
         nodes['plugin.settings.btn.defaults.user'] = 'dialog.plugin.settings.btn.defaults.user'
         nodes['plugin.settings.btn.defaults.app'] = 'dialog.plugin.settings.btn.defaults.app'
@@ -190,7 +218,6 @@ class Mapping:
         nodes['preset.name.label'] = 'preset.name'
         nodes['preset.ai_name.label'] = 'preset.ai_name'
         nodes['preset.user_name.label'] = 'preset.user_name'
-        nodes['preset.temperature.label'] = 'preset.temperature'
         nodes['preset.prompt.label'] = 'preset.prompt'
         nodes['preset.idx.label'] = 'preset.idx'
         nodes['preset.agent_provider.label'] = 'preset.agent_provider'
@@ -239,11 +266,6 @@ class Mapping:
         nodes['attachments_uploaded.sync.tip'] = 'attachments_uploaded.sync.tip'
 
         nodes['tip.input.attachments.ctx'] = 'tip.input.attachments.ctx'
-        nodes['input.attachments.ctx.mode.label'] = 'attachments.ctx.label'
-        nodes['input.attachments.ctx.mode.full'] = 'attachments.ctx.mode.full'
-        nodes['input.attachments.ctx.mode.query'] = 'attachments.ctx.mode.query'
-        nodes['input.attachments.ctx.mode.query_summary'] = 'attachments.ctx.mode.summary'
-        nodes['input.attachments.ctx.mode.off'] = 'attachments.ctx.mode.off'
 
         # filesystem
         nodes['idx.btn.db.index_all'] = 'settings.llama.extra.btn.idx_db_all'
@@ -253,7 +275,7 @@ class Mapping:
         nodes['idx.db.settings.legend.head'] = 'settings.llama.extra.btn.idx_head'
 
         # dialog: changelog
-        nodes['dialog.changelog.label'] = 'dialog.changelog.title'
+        #nodes['dialog.changelog.label'] = 'dialog.changelog.title'
 
         # dialog: license
         nodes['dialog.license.label'] = 'dialog.license.label'
@@ -289,8 +311,6 @@ class Mapping:
 
         # help tips
         nodes['tip.output.tab.files'] = 'tip.output.tab.files'
-        nodes['tip.output.tab.draw'] = 'tip.output.tab.draw'
-        nodes['tip.output.tab.calendar'] = 'tip.output.tab.calendar'
         nodes['tip.output.tab.notepad'] = 'tip.output.tab.notepad'
         nodes['tip.input.attachments'] = 'tip.input.attachments'
         nodes['tip.input.attachments.uploaded'] = 'tip.input.attachments.uploaded'
@@ -324,26 +344,60 @@ class Mapping:
         nodes['tool.indexer.ctx.header.tip'] = 'tool.indexer.tab.ctx.tip'
         nodes['tool.indexer.browse.header.tip'] = 'tool.indexer.tab.browse.tip'
 
+        # Agent Skills dialog
+        nodes['skills.info'] = 'skills.info'
+        nodes['skills.btn.close'] = 'action.close'
+        nodes['skills.installed.btn.github'] = 'skills.import.github'
+        nodes['skills.installed.btn.file'] = 'skills.import.file'
+        nodes['skills.installed.btn.folder'] = 'skills.import.folder'
+        nodes['skills.installed.btn.open'] = 'skills.open_dir'
+        nodes['skills.installed.btn.refresh'] = 'action.refresh'
+        nodes['skills.catalog.label'] = 'skills.catalog.url'
+        nodes['skills.catalog.btn.refresh'] = 'skills.catalog.refresh'
+        nodes['skills.explore.btn.install'] = 'skills.install'
+
+        # External extensions dialog
+        nodes['extensions.btn.close'] = 'action.close'
+        nodes['extensions.installed.btn.zip'] = 'extensions.import.zip'
+        nodes['extensions.installed.btn.directory'] = 'extensions.import.directory'
+        nodes['extensions.installed.btn.github'] = 'extensions.import.github'
+        nodes['extensions.installed.btn.open'] = 'extensions.open_dir'
+        nodes['extensions.installed.btn.refresh'] = 'action.refresh'
+        nodes['extensions.registry.label'] = 'extensions.registry.url'
+        nodes['extensions.registry.btn.refresh'] = 'action.refresh'
+        nodes['extensions.explore.btn.install'] = 'extensions.install_update'
+
+        # MCP Connectors dialog
+        nodes['connectors.info'] = 'connectors.info'
+        nodes['connectors.btn.close'] = 'action.close'
+        nodes['connectors.installed.btn.github'] = 'connectors.import.github'
+        nodes['connectors.installed.btn.file'] = 'connectors.import.file'
+        nodes['connectors.installed.btn.folder'] = 'connectors.import.folder'
+        nodes['connectors.installed.btn.add'] = 'action.add'
+        nodes['connectors.installed.btn.edit'] = 'action.edit'
+        nodes['connectors.installed.btn.mcp'] = 'connectors.mcp_settings'
+        nodes['connectors.catalog.label'] = 'connectors.catalog.url'
+        nodes['connectors.catalog.btn.refresh'] = 'action.refresh'
+        nodes['connectors.explore.btn.install'] = 'connectors.install'
+
         menu_title = {}
         menu_title['menu.app'] = 'menu.file'
         menu_title['menu.config'] = 'menu.config'
-        menu_title['config.edit.css'] = 'menu.config.edit.css'
-        menu_title['config.edit.json'] = 'menu.config.edit.json'
         menu_title['config.profile'] = 'menu.config.profile'
         menu_title['config.models'] = 'menu.config.models'
+        menu_title['config.mcp'] = 'menu.config.mcp'
         menu_title['menu.lang'] = 'menu.lang'
         menu_title['menu.debug'] = 'menu.debug'
         menu_title['menu.theme'] = 'menu.theme'
-        menu_title['theme.dark'] = 'menu.theme.dark'
-        menu_title['theme.light'] = 'menu.theme.light'
+        menu_title['theme.theme'] = 'menu.theme.color_theme'
         menu_title['theme.syntax'] = 'menu.theme.syntax'
         menu_title['theme.density'] = 'menu.theme.density'
         menu_title['theme.style'] = 'menu.theme.style'
         menu_title['menu.plugins'] = 'menu.plugins'
+        menu_title['config.skills'] = 'menu.skills'
         menu_title['menu.plugins.presets'] = 'menu.plugins.presets'
         menu_title['menu.about'] = 'menu.info'
         menu_title['menu.audio'] = 'menu.audio'
-        menu_title['menu.video'] = 'menu.video'
         menu_title['menu.tools'] = 'menu.tools'
         menu_title['menu.donate'] = 'menu.info.donate'
 
@@ -355,20 +409,34 @@ class Mapping:
         menu_text['app.clear_history_groups'] = 'menu.file_clear_history_groups'
         menu_text['app.exit'] = 'menu.file.exit'
         menu_text['config.settings'] = 'menu.config.settings'
+        menu_text['config.agents'] = 'menu.config.agents'
+        menu_text['config.mcp.settings'] = 'menu.config.mcp.settings'
+        menu_text['config.mcp.connectors'] = 'menu.config.mcp.connectors'
+        menu_text['config.mcp.enabled'] = 'menu.config.mcp.enabled'
+        menu_text['config.extensions'] = 'menu.config.extensions'
         menu_text['config.models.edit'] = 'menu.config.models.edit'
         menu_text['config.models.import.provider'] = 'menu.config.models.import.provider'
         menu_text['config.access'] = 'menu.config.access'
         menu_text['config.open_dir'] = 'menu.config.open_dir'
         menu_text['config.change_dir'] = 'menu.config.change_dir'
-        menu_text['config.edit.css.restore'] = 'menu.config.edit.css.restore'
+        menu_text['config.open_base_dir'] = 'menu.config.open_base_directory'
         menu_text['config.profile.edit'] = 'menu.config.profile.edit'
         menu_text['config.profile.new'] = 'menu.config.profile.new'
         menu_text['config.save'] = 'menu.config.save'
         menu_text['theme.tooltips'] = 'menu.theme.tooltips'
+        menu_text['theme.fullscreen'] = 'menu.tray.screenshot.full_screen'
         menu_text['theme.settings'] = 'menu.theme.settings'
         menu_text['plugins.presets.new'] = 'menu.plugins.presets.new'
         menu_text['plugins.presets.edit'] = 'menu.plugins.presets.edit'
         menu_text['plugins.settings'] = 'menu.plugins.settings'
+        menu_text['skills.manage'] = 'skills.manage'
+        menu_text['skills.explore'] = 'skills.explore'
+        menu_text['skills.import.github'] = 'skills.import.github'
+        menu_text['skills.import.file'] = 'skills.import.file'
+        menu_text['skills.import.folder'] = 'skills.import.folder'
+        menu_text['skills.open_dir'] = 'skills.open_dir'
+        menu_text['menu.plugins.section.common'] = 'menu.plugins.section.common'
+        menu_text['menu.plugins.section.other'] = 'menu.plugins.section.other'
         menu_text['info.about'] = 'menu.info.about'
         menu_text['info.changelog'] = 'menu.info.changelog'
         menu_text['info.updates'] = 'menu.info.updates'
@@ -377,7 +445,10 @@ class Mapping:
         menu_text['info.snap'] = 'menu.info.snap'
         menu_text['info.website'] = 'menu.info.website'
         menu_text['info.github'] = 'menu.info.github'
+        menu_text['info.addons'] = 'menu.info.addons'
         menu_text['info.report'] = 'menu.info.report'
+        menu_text['menu.audio.section.audio'] = 'menu.audio.section.audio'
+        menu_text['menu.audio.section.video'] = 'menu.audio.section.video'
         menu_text['audio.output'] = 'menu.audio.output'
         menu_text['audio.input'] = 'menu.audio.input'
         menu_text['audio.control.plugin'] = 'menu.audio.control.plugin'
@@ -397,6 +468,7 @@ class Mapping:
             menu_text['debug.assistants'] = 'menu.debug.assistants'
             menu_text['debug.ui'] = 'menu.debug.ui'
             menu_text['debug.agent'] = 'menu.debug.agent'
+            menu_text['debug.agents_v2'] = 'mode.agent_v2'
             menu_text['debug.events'] = 'menu.debug.events'
             menu_text['debug.db'] = 'menu.debug.db'
             menu_text['debug.logger'] = 'menu.debug.logger'
@@ -417,7 +489,6 @@ class Mapping:
         dialog_title['remote_store'] = 'dialog.remote_store'
         dialog_title['editor.preset.presets'] = 'dialog.preset'
         dialog_title['image'] = 'dialog.image.title'
-        dialog_title['interpreter'] = 'dialog.interpreter.title'
         dialog_title['confirm'] = 'dialog.confirm.title'
         dialog_title['rename'] = 'dialog.rename.title'
         dialog_title['update'] = 'update.title'
@@ -426,18 +497,33 @@ class Mapping:
         dialog_title['profile.editor'] = 'dialog.profile.editor'
         dialog_title['profile.item'] = 'dialog.profile.item.editor'
         dialog_title['tool.indexer'] = 'tool.indexer.title'
+        dialog_title['skills'] = 'skills.title'
+        dialog_title['connectors'] = 'connectors.title'
 
         tooltips = {}
-        tooltips['prompt.context'] = 'tip.tokens.ctx'
-        tooltips['input.counter'] = 'tip.tokens.input'
         tooltips['inline.vision'] = 'vision.checkbox.tooltip'
         tooltips['cmd.enabled'] = 'cmd.tip'
+        tooltips['prompt.mode'] = 'toolbox.mode.tooltip'
+        tooltips['ctx.new'] = 'ctx.new.tooltip'
+        tooltips['ctx.search.toggle'] = 'ctx.list.search.placeholder'
+        tooltips['toolbar.home'] = 'output.tab.chat'
+        tooltips['toolbar.toolbox'] = 'toolbar.toolbox'
+        tooltips['indexes.select'] = 'toolbox.indexes.select.tooltip'
+        tooltips['indexes.new'] = 'toolbox.indexes.edit.tooltip'
+        tooltips['layout.split'] = 'layout.split.tooltip'
+        tooltips['layout.split.button.0'] = 'layout.split.tooltip'
+        tooltips['layout.split.button.1'] = 'layout.split.tooltip'
+        tooltips['preset.prompt'] = 'toolbox.prompt'
         tooltips['icon.video.capture'] = 'icon.video.capture'
         tooltips['icon.audio.output'] = 'icon.audio.output'
         tooltips['icon.audio.input'] = 'icon.audio.input'
         tooltips['icon.remote_tool.web'] = 'icon.remote_tool.web'
         tooltips['remote_store.btn.refresh_status'] = 'dialog.remote_store.btn.refresh_status'
         tooltips['agent.llama.loop.score'] = 'toolbox.agent.llama.loop.score.tooltip'
+        tooltips['attachments.btn.options'] = 'action.options'
+        tooltips['attachments_ctx.btn.options'] = 'action.options'
+        tooltips['models.importer.add'] = 'models.importer.add.tooltip'
+        tooltips['models.importer.remove'] = 'models.importer.remove.tooltip'
 
         menu_tooltips = {}
         menu_tooltips['video.capture'] = 'vision.capture.enable.tooltip'
@@ -445,8 +531,13 @@ class Mapping:
 
         placeholders = {}
         placeholders['ctx.search'] = 'ctx.list.search.placeholder'
-        placeholders['interpreter.input'] = 'interpreter.input.placeholder'
         placeholders['input'] = 'input.placeholder'
+        placeholders['logger.console'] = 'logger.console.placeholder'
+        placeholders['skills.catalog.url'] = 'skills.catalog.url.placeholder'
+        placeholders['skills.search'] = 'input.search.placeholder'
+        placeholders['connectors.catalog.url'] = 'connectors.catalog.url.placeholder'
+        placeholders['connectors.search'] = 'input.search.placeholder'
+        placeholders['extensions.search'] = 'input.search.placeholder'
 
         mapping = {}
         mapping['nodes'] = nodes

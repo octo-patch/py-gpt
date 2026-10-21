@@ -1,8 +1,8 @@
 {
     "__meta__": {
-        "version": "2.6.30",
-        "app.version": "2.6.30",
-        "updated_at": "2025-08-28T09:00:00"
+        "version": "2.8.5",
+        "app.version": "2.8.5",
+        "updated_at": "2026-09-02T18:00:00"
     },
     "items": {
         "chat": {
@@ -15,6 +15,12 @@
             "id": "llama_index",
             "name": "Index (LlamaIndex)",
             "label": "mode.llama_index",
+            "default": false
+        },
+        "agent_v2": {
+            "id": "agent_v2",
+            "name": "Agents",
+            "label": "mode.agent_v2",
             "default": false
         },
         "audio": {
@@ -41,29 +47,18 @@
             "label": "mode.img",
             "default": false
         },
-        "assistant": {
-            "id": "assistant",
-            "name": "assistant",
-            "label": "mode.assistant",
-            "default": false
-        },    
-        "agent_llama": {
-            "id": "agent_llama",
-            "name": "Agent (LlamaIndex)",
-            "label": "mode.agent_llama",
+        "computer": {
+            "id": "computer",
+            "name": "Computer",
+            "label": "mode.computer",
             "default": false
         },
         "agent_openai": {
             "id": "agent_openai",
             "name": "Agent (OpenAI)",
             "label": "mode.agent_openai",
-            "default": false
-        },
-        "agent": {
-            "id": "agent",
-            "name": "Agent (legacy)",
-            "label": "mode.agent",
-            "default": false
+            "default": false,
+            "legacy": true
         },
         "expert": {
             "id": "expert",
@@ -71,11 +66,18 @@
             "label": "mode.expert",
             "default": false
         },
-        "computer": {
-            "id": "computer",
-            "name": "Computer",
-            "label": "mode.computer",
+        "agent": {
+            "id": "agent",
+            "name": "Autonomous mode",
+            "label": "mode.agent",
             "default": false
+        },
+        "agent_llama": {
+            "id": "agent_llama",
+            "name": "Custom agents",
+            "label": "mode.agent_llama",
+            "default": false,
+            "legacy": false
         }
     }
 }

@@ -18,6 +18,7 @@ import websockets
 from typing import Optional, Callable, Awaitable
 from urllib.parse import urlencode
 
+from pygpt_net.core.qt import safe_emit
 from pygpt_net.core.events import RealtimeEvent
 from pygpt_net.item.ctx import CtxItem
 from pygpt_net.core.text.utils import has_unclosed_code_tag
@@ -72,6 +73,7 @@ class xAIIRealtimeClient:
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._rx_task: Optional[asyncio.Task] = None
         self._running: bool = False
+        self._transport_error_reported: bool = False
 
         # Background loop
         self._bg = BackgroundLoop(name="xAI-RT-Loop")
@@ -128,7 +130,19 @@ class xAIIRealtimeClient:
         :param should_stop: Sync callback to signal barge-in (cancel active response)
         """
         self._ensure_background_loop()
+
+        # A persistent realtime session keeps one receiver loop alive across
+        # multiple user turns. Refresh the per-turn binding on *every* run, not
+        # only when the socket/session is first opened. Otherwise the receiver
+        # keeps calling the callbacks captured by the first RealtimeWorker: live
+        # deltas are then rendered into that old CtxItem while response.done is
+        # persisted into the current one. The mismatch becomes visible as text
+        # streaming inside an earlier message until the WebView is reloaded.
         self._ctx = ctx
+        self._on_text = on_text
+        self._on_audio = on_audio
+        self._should_stop = should_stop or (lambda: False)
+        self._last_opts = opts
 
         # If a different resumable handle is provided, reset to attempt best-effort resume.
         try:
@@ -236,6 +250,15 @@ class xAIIRealtimeClient:
         """Synchronous wrapper around reset_session()."""
         self._ensure_background_loop()
         self._bg.run_sync(self._reset_session_internal(ctx, opts, on_text, on_audio, should_stop), timeout=timeout)
+
+    def cancel_response_sync(self, timeout: float = 0.5):
+        """Cancel only the active response, preserving the live session."""
+        if not self._bg.loop or not self._bg.loop.is_running():
+            return
+        try:
+            self._bg.run_sync(self._cancel_active_response_internal(), timeout=timeout)
+        except Exception:
+            pass
 
     def shutdown_sync(self, timeout: float = 5.0):
         """Synchronous wrapper around shutdown() — closes the WS but leaves the loop alive."""
@@ -385,7 +408,7 @@ class xAIIRealtimeClient:
             return
 
         core = self.window.core
-        api_key = self.window.core.config.get("api_key_xai")
+        api_key = self.window.core.llm.get_config("x_ai", "api_key")
         if not api_key:
             raise RuntimeError("xAPI key not configured")
 
@@ -423,14 +446,19 @@ class xAIIRealtimeClient:
         self._ctx = ctx
         self._last_opts = opts
 
-        # Control primitives
+        # Control primitives. A receiver that died unexpectedly can leave
+        # _response_active=True from the previous socket. A new connection has no
+        # such response, so clear all per-response state before starting it.
+        self._response_active = False
+        self._rt_state = None
         self._response_done = asyncio.Event()
         self._send_lock = asyncio.Lock()
 
         if self.debug:
             print(f"[open_session] owner_loop={id(asyncio.get_running_loop())}")
 
-        # Connect WS with robust fallback
+        # Connect WS with robust fallback. Keep the actual handshake exception in
+        # the chain so authentication/quota/server details reach the error dialog.
         try:
             self.ws = await websockets.connect(
                 url_plain,
@@ -440,9 +468,9 @@ class xAIIRealtimeClient:
                 ping_timeout=20,
                 close_timeout=5,
             )
-        except Exception as e:
+        except Exception as first_error:
             if self.debug:
-                print(f"[open_session] connect plain failed: {e!r}")
+                print(f"[open_session] connect plain failed: {first_error!r}")
             try:
                 self.ws = await websockets.connect(
                     url_with_q,
@@ -452,14 +480,15 @@ class xAIIRealtimeClient:
                     ping_timeout=20,
                     close_timeout=5,
                 )
-            except Exception as e2:
+            except Exception as fallback_error:
                 if self.debug:
-                    print(f"[open_session] fallback connect failed: {e2!r}")
+                    print(f"[open_session] fallback connect failed: {fallback_error!r}")
                 self.ws = None
+                raise RuntimeError(
+                    f"xAI Realtime: WebSocket connect failed: {fallback_error}"
+                ) from fallback_error
 
-        if not self.ws:
-            raise RuntimeError("xAI Realtime: WebSocket connect failed")
-
+        self._transport_error_reported = False
         if self.debug:
             print("[open_session] WS connected")
 
@@ -503,7 +532,17 @@ class xAIIRealtimeClient:
         if self.debug:
             print(f"[open_session] session_payload: {json.dumps(session_payload)}")
 
-        await self.ws.send(json.dumps(session_payload))
+        try:
+            await self.ws.send(json.dumps(session_payload))
+        except Exception as e:
+            ws = self.ws
+            self.ws = None
+            try:
+                if ws is not None:
+                    await ws.close()
+            except Exception:
+                pass
+            raise RuntimeError(f"xAI Realtime: session setup failed: {e}") from e
         if self.debug:
             print("[open_session] session.update sent")
 
@@ -810,7 +849,8 @@ class xAIIRealtimeClient:
                         "type": "input_audio_buffer.append",
                         "audio": base64.b64encode(chunk).decode("utf-8"),
                     }))
-                except Exception:
+                except Exception as e:
+                    await self._handle_transport_failure(e, self._ctx)
                     return
 
             # With server VAD enabled, the server commits the buffer automatically.
@@ -846,8 +886,8 @@ class xAIIRealtimeClient:
         async with self._send_lock:
             try:
                 await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-            except Exception:
-                pass
+            except Exception as e:
+                await self._handle_transport_failure(e, self._ctx)
 
     def force_response_now_sync(self, timeout: float = 5.0):
         """Synchronously force the model to create a response from current input buffer."""
@@ -875,7 +915,8 @@ class xAIIRealtimeClient:
             # 1) Finalize current input buffer
             try:
                 await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-            except Exception:
+            except Exception as e:
+                await self._handle_transport_failure(e, self._ctx)
                 return
 
             # 2) Prepare wait handle for this response
@@ -893,7 +934,8 @@ class xAIIRealtimeClient:
                     "type": "response.create",
                     "response": {"modalities": ["text", "audio"]},
                 }))
-            except Exception:
+            except Exception as e:
+                await self._handle_transport_failure(e, self._ctx)
                 return
 
     # -----------------------------
@@ -1084,6 +1126,7 @@ class xAIIRealtimeClient:
 
         DEFAULT_RATE = self._DEFAULT_RATE
         audio_done = True
+        response_ctx = None
 
         try:
             while self._running and self.ws:
@@ -1098,6 +1141,8 @@ class xAIIRealtimeClient:
                 except Exception as e:
                     if self.debug:
                         print(f"[_recv_loop] recv error: {e!r}")
+                    if self._running:
+                        self._emit_transport_error(e, response_ctx or self._ctx)
                     break
 
                 if isinstance(raw, bytes):
@@ -1109,6 +1154,7 @@ class xAIIRealtimeClient:
                     continue
 
                 etype = ev.get("type")
+                event_ctx = response_ctx or self._ctx
 
                 # ---- session / conversation lifecycle ----
                 if etype in ("session.created", "session.updated"):
@@ -1142,6 +1188,8 @@ class xAIIRealtimeClient:
                     if self.debug:
                         print("[_recv_loop] response created")
                     self._response_active = True
+                    response_ctx = self._ctx
+                    event_ctx = response_ctx
                     audio_done = False
                     self._rt_reset_state()
 
@@ -1157,7 +1205,7 @@ class xAIIRealtimeClient:
                     if self.debug:
                         print("[_recv_loop] audio_buffer committed")
                     if self._last_opts:
-                        self._last_opts.rt_signals.response.emit(RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_COMMIT, {
+                        safe_emit(self._last_opts.rt_signals, "response", RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_COMMIT, {
                             "ctx": self._ctx,
                         }))
 
@@ -1216,7 +1264,7 @@ class xAIIRealtimeClient:
                         self._rt_append_text(delta)
                         if self._on_text:
                             try:
-                                await self._on_text(str(delta))
+                                await self._on_text(str(delta), event_ctx)
                             except Exception:
                                 pass
 
@@ -1229,7 +1277,7 @@ class xAIIRealtimeClient:
                             self._rt_append_text(delta)
                             if self._on_text:
                                 try:
-                                    await self._on_text(str(delta))
+                                    await self._on_text(str(delta), event_ctx)
                                 except Exception:
                                     pass
 
@@ -1247,7 +1295,7 @@ class xAIIRealtimeClient:
                             self._rt_append_text(txt)
                             if self._on_text:
                                 try:
-                                    await self._on_text(str(txt))
+                                    await self._on_text(str(txt), event_ctx)
                                 except Exception:
                                     pass
                     elif ptype == "audio":
@@ -1255,7 +1303,7 @@ class xAIIRealtimeClient:
                         if b64 and self._on_audio:
                             try:
                                 data = base64.b64decode(b64)
-                                await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False)
+                                await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False, event_ctx)
                             except Exception:
                                 pass
                         tr = part.get("transcript")
@@ -1263,7 +1311,7 @@ class xAIIRealtimeClient:
                             self._rt_append_text(tr)
                             if self._on_text:
                                 try:
-                                    await self._on_text(str(tr))
+                                    await self._on_text(str(tr), event_ctx)
                                 except Exception:
                                     pass
 
@@ -1272,7 +1320,7 @@ class xAIIRealtimeClient:
                     if b64 and self._on_audio:
                         try:
                             data = base64.b64decode(b64)
-                            await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False)
+                            await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False, event_ctx)
                         except Exception:
                             pass
 
@@ -1281,7 +1329,7 @@ class xAIIRealtimeClient:
                         print("[_recv_loop] audio done")
                     if not audio_done and self._on_audio:
                         try:
-                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True)
+                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True, event_ctx)
                         except Exception:
                             pass
                         audio_done = True
@@ -1357,7 +1405,7 @@ class xAIIRealtimeClient:
                             self._rt_append_text(hdr + code_delta)
                             if self._on_text:
                                 try:
-                                    await self._on_text(hdr + code_delta)
+                                    await self._on_text(hdr + code_delta, event_ctx)
                                 except Exception:
                                     pass
                             self._rt_state["is_code"] = True
@@ -1365,7 +1413,7 @@ class xAIIRealtimeClient:
                             self._rt_append_text(code_delta)
                             if self._on_text:
                                 try:
-                                    await self._on_text(code_delta)
+                                    await self._on_text(code_delta, event_ctx)
                                 except Exception:
                                     pass
 
@@ -1377,7 +1425,7 @@ class xAIIRealtimeClient:
                         self._rt_append_text(tail)
                         if self._on_text:
                             try:
-                                await self._on_text(tail)
+                                await self._on_text(tail, event_ctx)
                             except Exception:
                                 pass
                         self._rt_state["is_code"] = False
@@ -1403,15 +1451,16 @@ class xAIIRealtimeClient:
                     if image_b64:
                         try:
                             img_bytes = base64.b64decode(image_b64)
-                            save_path = self.window.core.image.gen_unique_path(self._ctx)
+                            save_path = self.window.core.image.gen_unique_path(event_ctx)
                             with open(save_path, "wb") as f:
                                 f.write(img_bytes)
+                            self.window.core.filesystem.materialize_runtime_artifact(save_path, ctx=event_ctx)
                             self._rt_state["image_paths"].append(save_path)
                             self._rt_state["is_image"] = True
-                            if not isinstance(self._ctx.images, list):
-                                self._ctx.images = []
-                            if save_path not in self._ctx.images:
-                                self._ctx.images.append(save_path)
+                            if not isinstance(event_ctx.images, list):
+                                event_ctx.images = []
+                            if save_path not in event_ctx.images:
+                                event_ctx.images.append(save_path)
                         except Exception:
                             pass
 
@@ -1420,7 +1469,7 @@ class xAIIRealtimeClient:
                         print("[_recv_loop] response done")
                     if not audio_done and self._on_audio:
                         try:
-                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True)
+                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True, event_ctx)
                         except Exception:
                             pass
                         audio_done = True
@@ -1445,21 +1494,21 @@ class xAIIRealtimeClient:
                             pass
 
                     try:
-                        if self._ctx:
-                            self._ctx.output = output or (self._ctx.output or "")
+                        if event_ctx and not getattr(event_ctx, "_realtime_interrupted", False):
+                            event_ctx.output = output or (event_ctx.output or "")
                             up = self._rt_state.get("usage_payload") if self._rt_state else None
                             if up:
                                 in_tok = up.get("in")
                                 out_tok = up.get("out")
                                 if in_tok is None:
-                                    in_tok = self._ctx.input_tokens if self._ctx.input_tokens is not None else 0
+                                    in_tok = event_ctx.input_tokens if event_ctx.input_tokens is not None else 0
                                 if out_tok is None:
                                     out_tok = 0
-                                self._ctx.set_tokens(in_tok, out_tok)
+                                event_ctx.set_tokens(in_tok, out_tok)
                                 try:
-                                    if not isinstance(self._ctx.extra, dict):
-                                        self._ctx.extra = {}
-                                    self._ctx.extra["usage"] = {
+                                    if not isinstance(event_ctx.extra, dict):
+                                        event_ctx.extra = {}
+                                    event_ctx.extra["usage"] = {
                                         "vendor": "openai",
                                         "input_tokens": in_tok,
                                         "output_tokens": out_tok,
@@ -1470,47 +1519,47 @@ class xAIIRealtimeClient:
                                     pass
 
                             if self._rt_state and self._rt_state["citations"]:
-                                if self._ctx.urls is None:
-                                    self._ctx.urls = []
+                                if event_ctx.urls is None:
+                                    event_ctx.urls = []
                                 for u in self._rt_state["citations"]:
-                                    if u not in self._ctx.urls:
-                                        self._ctx.urls.append(u)
+                                    if u not in event_ctx.urls:
+                                        event_ctx.urls.append(u)
 
                             if self._rt_state and self._rt_state["image_paths"]:
-                                if not isinstance(self._ctx.images, list):
-                                    self._ctx.images = []
+                                if not isinstance(event_ctx.images, list):
+                                    event_ctx.images = []
                                 for p in self._rt_state["image_paths"]:
-                                    if p not in self._ctx.images:
-                                        self._ctx.images.append(p)
+                                    if p not in event_ctx.images:
+                                        event_ctx.images.append(p)
 
-                            self.window.core.ctx.update_item(self._ctx)
+                            self.window.core.ctx.update_item(event_ctx)
                     except Exception:
                         pass
 
                     try:
                         files = (self._rt_state or {}).get("files") or []
-                        if files:
-                            self.window.core.api.openai.container.download_files(self._ctx, files)
+                        if files and not getattr(event_ctx, "_realtime_interrupted", False):
+                            self.window.core.api.openai.container.download_files(event_ctx, files)
                     except Exception:
                         pass
 
                     try:
                         tcs = (self._rt_state or {}).get("tool_calls") or []
-                        if tcs:
+                        if tcs and not getattr(event_ctx, "_realtime_interrupted", False):
                             for tc in tcs:
                                 fn = tc.get("function") or {}
                                 if isinstance(fn.get("arguments"), dict):
                                     fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
-                            self._ctx.force_call = bool((self._rt_state or {}).get("force_func_call"))
+                            event_ctx.force_call = bool((self._rt_state or {}).get("force_func_call"))
                             self.window.core.debug.info("[realtime] Tool calls found, unpacking...")
-                            self.window.core.command.unpack_tool_calls_chunks(self._ctx, tcs)
-                            self.window.core.ctx.update_item(self._ctx)
+                            self.window.core.command.unpack_tool_calls_chunks(event_ctx, tcs)
+                            self.window.core.ctx.update_item(event_ctx)
                     except Exception:
                         pass
 
                     try:
                         tcs = (self._rt_state or {}).get("tool_calls") or []
-                        if tcs:
+                        if tcs and not getattr(event_ctx, "_realtime_interrupted", False):
                             self._last_tool_calls = list(tcs)
                     except Exception:
                         pass
@@ -1519,11 +1568,12 @@ class xAIIRealtimeClient:
                         self._response_done.set()
 
                     if self._last_opts:
-                        self._last_opts.rt_signals.response.emit(RealtimeEvent(RealtimeEvent.RT_OUTPUT_TURN_END, {
-                            "ctx": self._ctx,
+                        safe_emit(self._last_opts.rt_signals, "response", RealtimeEvent(RealtimeEvent.RT_OUTPUT_TURN_END, {
+                            "ctx": event_ctx,
                         }))
 
                     self._rt_state = None
+                    response_ctx = None
 
                 elif etype == "error":
                     if self.debug:
@@ -1533,11 +1583,30 @@ class xAIIRealtimeClient:
                     code = (err.get("code") or "")
                     if isinstance(code, str) and code.strip().lower() == "session_expired":
                         self._rt_session_id = None
-                        if self.debug:
-                            print("[_recv_loop] session expired")
-                    if "already has an active response" in (msg or "").lower():
+                        self._response_active = False
                         if self._response_done:
                             self._response_done.set()
+                        if self.debug:
+                            print("[_recv_loop] session expired; closing stale socket")
+                        # The server-side session is no longer usable even if the
+                        # websocket object has not closed yet. Tear it down now so
+                        # is_session_active() becomes false and the next turn
+                        # reconnects instead of silently writing into a dead session.
+                        if self._last_opts:
+                            safe_emit(
+                                self._last_opts.rt_signals,
+                                "response",
+                                RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_ERROR, {
+                                    "error": RuntimeError("Realtime session expired")
+                                }),
+                            )
+                        break
+                    if "already has an active response" in (msg or "").lower():
+                        # A duplicate response.create does not mean the active
+                        # response has completed. Keep the turn open and wait for
+                        # the real response.done; marking _response_done here lets
+                        # subsequent microphone turns overlap the still-live one.
+                        self._response_active = True
                         continue
                     if self._response_done:
                         self._response_done.set()
@@ -1549,6 +1618,8 @@ class xAIIRealtimeClient:
         except Exception as e:
             if self.debug:
                 print(f"[_recv_loop] exception: {e!r}")
+            if self._running:
+                self._emit_transport_error(e, response_ctx or self._ctx)
         finally:
             if self.debug:
                 print("[_recv_loop] stopped")
@@ -1564,10 +1635,48 @@ class xAIIRealtimeClient:
                 pass
             self.ws = None
             self._running = False
+            self._response_active = False
+            self._rt_state = None
 
     # -----------------------------
     # Helpers
     # -----------------------------
+
+    def _emit_transport_error(self, error, ctx=None) -> None:
+        """Emit one main-thread error for one failed websocket generation."""
+        if self._transport_error_reported:
+            return
+        self._transport_error_reported = True
+        if not self._last_opts:
+            return
+        safe_emit(
+            self._last_opts.rt_signals,
+            "response",
+            RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_ERROR, {
+                "ctx": ctx or self._ctx,
+                "error": error,
+                "provider": "x_ai",
+                "phase": "transport",
+            }),
+        )
+
+    async def _handle_transport_failure(self, error, ctx=None) -> None:
+        """Invalidate a broken websocket immediately and wake all turn waiters."""
+        self._emit_transport_error(error, ctx)
+        self._running = False
+        self._response_active = False
+        try:
+            if self._response_done and not self._response_done.is_set():
+                self._response_done.set()
+        except Exception:
+            pass
+        ws = self.ws
+        self.ws = None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     def _preferred_voice(self) -> str:
         """

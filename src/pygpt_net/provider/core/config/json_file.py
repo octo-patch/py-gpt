@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.07.17 21:00:00                  #
+# Updated Date: 2026.09.24 12:31:00
 # ================================================== #
 
 import json
@@ -30,12 +30,16 @@ class JsonFileProvider(BaseProvider):
         self.config_file = 'config.json'
         self.settings_file = 'settings.json'
         self.sections_file = 'settings_section.json'
+        self.config_created = False
 
     def install(self):
         """Install provider data files"""
+        self.config_created = False
+
         # config file
         dst = os.path.join(self.path, self.config_file)
         if not os.path.exists(dst):
+            self.config_created = True
             src = os.path.join(self.path_app, 'data', 'config', self.config_file)
             shutil.copyfile(src, dst)
         else:
@@ -55,14 +59,7 @@ class JsonFileProvider(BaseProvider):
                 shutil.copyfile(src, dst)
                 print("RECOVERY: Restored config file from base config: {}".format(src))
 
-        # data tmp
-        tmp_dir = os.path.join(self.window.core.config.get_user_dir('data'), 'tmp')
-        if not os.path.exists(tmp_dir):
-            try:
-                os.makedirs(tmp_dir, exist_ok=True)
-            except Exception as e:
-                print("WARNING: Cannot create ``{}`` data temp directory: {}".format(tmp_dir, e))
-
+        # temporary files are stored in the base workdir/tmp directory
         # base tmp
         tmp_dir = os.path.join(self.window.core.config.get_user_path(), 'tmp')
         if not os.path.exists(tmp_dir):

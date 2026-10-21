@@ -6,14 +6,17 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.02.06 01:00:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
+
+from threading import Event as ThreadEvent
 
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
 
 from pygpt_net.core.types import (
     MODE_AGENT_LLAMA,
     MODE_AGENT_OPENAI,
+    MODE_AGENT_V2,
     MODE_LANGCHAIN,
     MODE_LLAMA_INDEX,
     MODE_ASSISTANT,
@@ -22,8 +25,10 @@ from pygpt_net.core.types import (
     MODE_CHAT,
     MODE_RESEARCH,
     MODE_COMPUTER,
+    MODE_COMPLETION,
 )
 from pygpt_net.core.events import KernelEvent, Event
+from pygpt_net.core.qt import safe_emit
 
 
 class BridgeSignals(QObject):
@@ -32,11 +37,12 @@ class BridgeSignals(QObject):
 
 
 class BridgeWorker(QRunnable):
-    __slots__ = ('signals', 'rt_signals', 'args', 'kwargs', 'window', 'context', 'extra', 'mode')
+    __slots__ = ('signals', 'rt_signals', 'args', 'kwargs', 'window', 'context', 'extra', 'mode', 'execution_done')
 
     """Bridge worker"""
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.execution_done = ThreadEvent()
         self.signals = BridgeSignals()
         self.rt_signals = None
         self.args = args
@@ -45,6 +51,11 @@ class BridgeWorker(QRunnable):
         self.context = None
         self.extra = None
         self.mode = None
+
+
+    def _emit(self, name: str, *args) -> bool:
+        """Safely emit a bridge Qt signal during late worker teardown."""
+        return safe_emit(self.signals, name, *args)
 
     @Slot()
     def run(self):
@@ -58,11 +69,16 @@ class BridgeWorker(QRunnable):
             self.handle_post_prompt_async()
 
             # ADDITIONAL CONTEXT: append additional context from attachments
-            if self.mode != MODE_ASSISTANT:
-                self.handle_additional_context()
+            self.handle_additional_context()
 
             # POST PROMPT END: handle post prompt end event
             self.handle_post_prompt_end()
+
+            # Apply the global prompt-injection annotation after all late system
+            # prompt hooks so external-context warnings remain the final policy.
+            self.context.system_prompt = core.security.append_prompt_injection_guard(
+                self.context.system_prompt, ensure_last=True, mode=self.mode
+            )
 
             # Langchain
             if self.mode == MODE_LANGCHAIN:
@@ -83,6 +99,18 @@ class BridgeWorker(QRunnable):
                     extra=self.extra,
                     signals=self.signals,
                 )
+
+            # Agents v2 (new isolated orchestration runtime)
+            elif self.mode == MODE_AGENT_V2:
+                result = core.agents_v2.runner.call(
+                    context=self.context,
+                    extra=self.extra,
+                    signals=self.signals,
+                )
+                if result:
+                    self.cleanup()
+                    return
+                self.extra["error"] = str(core.agents_v2.runner.get_error())
 
             # Agents (OpenAI, Llama)
             elif self.mode in (
@@ -112,73 +140,76 @@ class BridgeWorker(QRunnable):
                 else:
                     self.extra["error"] = str(core.agents.runner.get_error())
 
-            # API SDK: chat, completion, vision, image, assistants
-            else:
-                sdk = "openai"  # default to OpenAI SDK
+            # Completion normally uses the LlamaIndex completion provider so all
+            # configured backends share one path. Keep one narrow exception for
+            # OpenAI's legacy instruct model: without active chat-style RAG it
+            # must use the native OpenAI SDK Completions endpoint. A selected RAG
+            # index is intentionally ignored when Completion "As chat" is off.
+            elif self.mode == MODE_COMPLETION \
+                    and self.context.model is not None:
                 model = self.context.model
-                if model.provider == "google":
-                    if core.config.get("api_native_google", False):
-                        sdk = "google"
-                elif model.provider == "anthropic":
-                    if core.config.get("api_native_anthropic", False):
-                        sdk = "anthropic"
-                elif model.provider == "x_ai":
-                    if core.config.get("api_native_xai", False):
-                        sdk = "x_ai"
+                completion_as_chat = bool(
+                    core.config.get("completion.as_chat", True)
+                )
+                native_openai_completion = (
+                    model.provider == "openai"
+                    and model.id == "gpt-3.5-turbo-instruct"
+                    and (
+                        not completion_as_chat
+                        or not core.idx.is_valid(self.context.idx)
+                    )
+                )
+                if native_openai_completion:
+                    core.debug.info(
+                        "[bridge] Using native OpenAI SDK completion provider."
+                    )
+                    result = core.bridge.call_api(
+                        context=self.context,
+                        extra=self.extra,
+                        rt_signals=self.rt_signals,
+                        signals=self.signals,
+                    )
+                else:
+                    core.debug.info("[bridge] Using LlamaIndex completion provider.")
+                    result = core.idx.completion.call(
+                        context=self.context,
+                        extra=self.extra,
+                    )
 
-                # call appropriate SDK
-                if sdk == "google":
-                    core.debug.info("[bridge] Using Google SDK.")
-                    result = core.api.google.call(
-                        context=self.context,
-                        extra=self.extra,
-                        rt_signals=self.rt_signals,
-                    )
-                elif sdk == "anthropic":
-                    core.debug.info("[bridge] Using Anthropic SDK.")
-                    result = core.api.anthropic.call(
-                        context=self.context,
-                        extra=self.extra,
-                        rt_signals=self.rt_signals,
-                    )
-                elif sdk == "x_ai":
-                    core.debug.info("[bridge] Using xAI SDK.")
-                    result = core.api.xai.call(
-                        context=self.context,
-                        extra=self.extra,
-                        rt_signals=self.rt_signals,
-                    )
-                elif sdk == "openai":
-                    core.debug.info("[bridge] Using OpenAI SDK.")
-                    result = core.api.openai.call(
-                        context=self.context,
-                        extra=self.extra,
-                        rt_signals=self.rt_signals,
-                    )
+            # API/provider dispatch with the same LlamaIndex fallback as quick calls.
+            else:
+                result = core.bridge.call_api(
+                    context=self.context,
+                    extra=self.extra,
+                    rt_signals=self.rt_signals,
+                    signals=self.signals,
+                )
         except Exception as e:
-            if self.signals:
+            if self.extra is not None:
                 self.extra["error"] = e
-                event = KernelEvent(KernelEvent.RESPONSE_FAILED, {
-                    'context': self.context,
-                    'extra': self.extra,
-                })
-                self.signals.response.emit(event)
-                self.cleanup()
-                return
-
-        # send response to main thread
-        if self.signals:
-            name = KernelEvent.RESPONSE_OK if result else KernelEvent.RESPONSE_ERROR
-            event = KernelEvent(name, {
+            event = KernelEvent(KernelEvent.RESPONSE_FAILED, {
                 'context': self.context,
                 'extra': self.extra,
             })
-            self.signals.response.emit(event)
+            self._emit("response", event)
+            self.cleanup()
+            return
+
+        # send response to main thread
+        name = KernelEvent.RESPONSE_OK if result else KernelEvent.RESPONSE_ERROR
+        event = KernelEvent(name, {
+            'context': self.context,
+            'extra': self.extra,
+        })
+        self._emit("response", event)
 
         self.cleanup()
 
     def cleanup(self):
         """Cleanup resources after worker execution."""
+        done = getattr(self, "execution_done", None)
+        if done is not None:
+            done.set()
         sig = self.signals
         self.signals = None
         if sig is not None:
@@ -209,60 +240,53 @@ class BridgeWorker(QRunnable):
         self.window.dispatch(event)
         self.context.system_prompt = event.data['value']
 
-    def allowed_single_append(self, context) -> bool:
-        """Check if only single append of additional context is allowed for current mode and provider"""
-        if context is None or context.model is None:
-            return False
-        allowed_modes = [MODE_CHAT, MODE_RESEARCH, MODE_COMPUTER]
-        if context.model.provider == "openai":
-            use_responses_api = self.window.core.api.openai.responses.is_enabled(
-                context.model,
-                context.mode,
-                context.parent_mode,
-                context.is_expert_call,
-                context.preset
-            )
-            if use_responses_api and context.mode in allowed_modes:
-                return True
-        elif context.model.provider == "x_ai":
-            if not context.model.id.startswith("grok-3") and context.mode in allowed_modes:
-                return True
-        return False
-
     def handle_additional_context(self):
         """Append additional context"""
+        if getattr(self.context, "extra_context_prepared", False):
+            return
         ctx = self.context.ctx
         if ctx is None:
             return
         if ctx.meta is None:
             return
-        if not self.window.controller.chat.attachment.has_context(ctx.meta):
+        if getattr(ctx, "internal", False) or getattr(ctx, "turn_continuation", False):
             return
 
-        # determine if only current attachment content should be appended
-        only_current = self.window.core.config.get("ctx.attachment.append_once", False)  # force single append
-        auto_detect = self.window.core.config.get("ctx.attachment.auto_append", True) # auto-detect if allowed
-        if not only_current and auto_detect:
-            if self.allowed_single_append(self.context):
-                only_current = True
-
-        # if group additional context exists, append it to current additional context
-        if only_current and ctx.meta.group:
-            if ctx.meta.group.additional_ctx is None:
-                ctx.meta.group.additional_ctx = []
-            if ctx.meta.additional_ctx_current is None:
-                ctx.meta.additional_ctx_current = []
-            ctx.meta.additional_ctx_current.extend(ctx.meta.group.additional_ctx)
-
-        ad_context = self.window.controller.chat.attachment.get_context(
-            ctx,
-            self.context.history,
-            only_current=only_current
-        )
-        ad_mode = self.window.controller.chat.attachment.get_mode()
+        attachment = self.window.controller.chat.attachment
+        if (not attachment.has_context(ctx.meta)
+                and not self.window.core.attachments.context.current_ids(ctx)
+                and not self.window.core.attachments.context.is_project_share_enabled(ctx.meta)
+                and not any(isinstance(getattr(row, "extra", None), dict) and row.extra.get("project_context")
+                            for row in self.context.history)):
+            return
+        # Attachments belong to the uploading turn. History providers replay
+        # hidden_input; Responses providers retain that same user message.
+        ad_context = attachment.get_context(ctx, self.context.history, only_current=True)
+        attachment.bind_current_to_ctx(ctx)
+        if self.window.core.config.get("context.extra_summary.enabled", False):
+            ad_context = self.window.core.summarizer.process(ad_context, self.context, "attachments and web readers")
+        # Account for current uploads before allocating project evidence.
+        original_prompt = self.context.prompt
         if ad_context:
-            self.context.prompt += f"\n\n{ad_context}"  # append to input text
-            if (ad_mode == self.window.controller.chat.attachment.MODE_QUERY_CONTEXT
-                    or self.mode in [MODE_AGENT_LLAMA, MODE_AGENT_OPENAI]):
-                ctx.hidden_input = ad_context  # store for future use, only if query context
-                # if full context or summary, then whole extra context will be applied to current input
+            self.context.prompt += "\n\n" + ad_context
+        try:
+            project_context = ""
+            delivery = None
+            project = getattr(self.window.core.attachments.context, "project", None)
+            if project is not None:
+                delivery = project.prepare(self.context)
+                project_context = delivery.text
+        finally:
+            self.context.prompt = original_prompt
+        if delivery is not None:
+            project.record(ctx, delivery)
+        # Runtime project input is never stored on every user turn.
+        if ad_context:
+            hidden = ctx.hidden_input or ""
+            if ad_context not in hidden:
+                ctx.hidden_input = "\n\n".join(filter(None, [hidden, ad_context]))
+            if ad_context not in self.context.prompt:
+                self.context.prompt = f"{self.context.prompt}\n\n{ad_context}"
+        if project_context and project_context not in self.context.prompt:
+            self.context.prompt += "\n\n" + project_context
+        self.context.extra_context_prepared = True

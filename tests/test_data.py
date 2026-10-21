@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2024.11.30 04:00:00                  #
+# Updated Date: 2026.09.05 12:30:00                  #
 # ================================================== #
 import configparser
 import io
@@ -22,6 +22,8 @@ def test_config():
     with open(path, "r") as f:
         data = json.load(f)
     assert "__meta__" in data
+    assert "api_custom_providers" in data
+    assert data["api_custom_providers"] == []
 
 
 def test_models():
@@ -45,7 +47,14 @@ def test_settings():
     path = os.path.join(config.get_app_path(), "data", "config", "settings.json")
     with open(path, "r") as f:
         data = json.load(f)
-    assert "api_key" in data
+    # Provider API settings are declared dynamically by LLM providers and
+    # are no longer stored as top-level entries in settings.json.
+    assert "api_key" not in data
+    assert "api_custom_providers" in data
+    custom = data["api_custom_providers"]
+    assert custom["section"] == "custom_providers"
+    assert custom["type"] == "dict"
+    assert custom["keys"]["api_key"]["secret"] is True
 
 
 def test_settings_section():
@@ -54,6 +63,7 @@ def test_settings_section():
     with open(path, "r") as f:
         data = json.load(f)
     assert "general" in data
+    assert data["custom_providers"]["label"] == "settings.section.custom_providers"
 
 
 def test_presets():
@@ -69,17 +79,37 @@ def test_presets():
 def test_css():
     config = Config()
     path = os.path.join(config.get_app_path(), "data", "css")
+
+    # Global CSS layers shared by all themes.
     files = [
-        "style.css",
-        "style.dark.css",
-        "style.light.css",
-        "markdown.css",
-        "markdown.dark.css",
-        "markdown.light.css",
+        "app.css",
+        "chat.css",
+        "chat.wide.css",
         "fix_windows.css",
+        "fix_windows.dark.css",
+        "fix_windows.light.css",
+        "agent_workflow.css",
     ]
     for file in files:
         assert os.path.exists(os.path.join(path, file))
+
+    # Every bundled theme is now a directory containing its native Qt,
+    # qt-material and WebEngine layers.
+    themes = [
+        "light",
+        "mint",
+        "gray",
+        "dark",
+        "matrix",
+        "flare",
+        "retro",
+        "ocean",
+        "sun",
+    ]
+    for theme in themes:
+        theme_path = os.path.join(path, theme)
+        for file in ("app.css", "app.xml", "chat.css"):
+            assert os.path.exists(os.path.join(theme_path, file))
 
 
 def test_fonts():
@@ -104,32 +134,51 @@ def test_fonts():
 def test_locale():
     config = Config()
     path = os.path.join(config.get_app_path(), "data", "locale")
-    files = [
-        "locale.en.ini",
-        "plugin.agent.en.ini",
-        "plugin.audio_output.en.ini",
-        "plugin.audio_input.en.ini",
-        "plugin.cmd_api.en.ini",
-        "plugin.cmd_code_interpreter.en.ini",
-        "plugin.cmd_custom.en.ini",
-        "plugin.cmd_files.en.ini",
-        "plugin.cmd_serial.en.ini",
-        "plugin.cmd_web.en.ini",
-        "plugin.crontab.en.ini",
-        "plugin.idx_llama_index.en.ini",
-        "plugin.openai_dalle.en.ini",
-        "plugin.openai_vision.en.ini",
-        "plugin.real_time.en.ini",
-    ]
-    for file in files:
-        assert os.path.exists(os.path.join(path, file))
 
-    all_files = os.listdir(path)
-    # check if .ini is parsing correctly
-    for file in all_files:
-        if file.endswith(".ini"):
+    # Core application locales stay at data/locale/locale.<lang>.ini.
+    assert os.path.exists(os.path.join(path, "locale.en.ini"))
+
+    # Plugin locales are isolated in per-plugin locale domains.
+    plugin_ids = [
+        "agent",
+        "audio_output",
+        "audio_input",
+        "cmd_api",
+        "filesystem",
+        "cmd_custom",
+        "cmd_serial",
+        "cmd_web",
+        "crontab",
+        "idx_llama_index",
+        "openai_dalle",
+        "openai_vision",
+        "real_time",
+    ]
+    for plugin_id in plugin_ids:
+        plugin_locale = os.path.join(path, "plugin", plugin_id, "locale.en.ini")
+        assert os.path.exists(plugin_locale)
+
+    # Every bundled INI, including nested plugin domains, must parse cleanly.
+    for dirpath, _, filenames in os.walk(path):
+        for file in filenames:
+            if not file.endswith(".ini"):
+                continue
             ini = configparser.ConfigParser()
-            path = os.path.join(config.get_app_path(), "data", "locale", file)
-            data = io.open(path, mode="r", encoding="utf-8")
-            ini.read_string(data.read())
+            file_path = os.path.join(dirpath, file)
+            with io.open(file_path, mode="r", encoding="utf-8") as data:
+                ini.read_string(data.read())
             assert len(ini) > 0
+
+            # These keys belong to the core locale domain only.
+            if dirpath == path and file.startswith("locale."):
+                locale = ini["LOCALE"]
+                for key in (
+                    "settings.section.custom_providers",
+                    "settings.custom_providers.list",
+                    "settings.custom_providers.list.desc",
+                    "settings.custom_providers.name",
+                    "settings.custom_providers.api_base",
+                    "settings.custom_providers.api_key",
+                ):
+                    assert key in locale
+

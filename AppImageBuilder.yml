@@ -1,4 +1,12 @@
-# https://github.com/AppImageCrafters/appimage-builder/releases/download/v1.1.0/appimage-builder-1.1.0-x86_64.AppImage
+# AppImage recipe for PyGPT.
+#
+# The repository keeps amd64/x86_64 as the default so this file can still be
+# used directly for local builds. GitHub Actions creates a temporary copy and
+# rewrites the architecture, Ubuntu mirrors and application version for the
+# native arm64/aarch64 build. The ARM64 GitHub build uses Ubuntu 24.04
+# (Noble/Python 3.12), because current PySide6 6.9.x Linux ARM64 wheels
+# target manylinux_2_39 / glibc 2.39. The local default remains
+# Ubuntu 22.04 (Jammy/Python 3.10) on x86_64 for wider compatibility.
 version: 1
 
 AppDir:
@@ -8,7 +16,7 @@ AppDir:
     id: io.github.szczyglis_dev.py-gpt
     name: PyGPT
     icon: io.github.szczyglis_dev.py-gpt
-    version: 2.7.12
+    version: 2.9.1
     exec: usr/bin/python3
     exec_args: -m pygpt_net.app $@
 
@@ -31,15 +39,9 @@ AppDir:
       - libasound2-plugins
       - libatomic1
       - libdbus-1-3
-      - libegl1
       - libfontconfig1
       - libfreetype6
-      - libgl1
-      - libgl1-mesa-dri
-      - libgl1-mesa-glx
       - libglib2.0-0
-      - libglu1-mesa
-      - libglx-mesa0
       - libgtk-3-0
       - libnss3
       - libpng16-16
@@ -62,7 +64,6 @@ AppDir:
       - shared-mime-info
       - hicolor-icon-theme
       - adwaita-icon-theme
-      - mesa-utils
       - packagekit-gtk3-module
       - python3
       - python3-venv
@@ -82,12 +83,12 @@ AppDir:
     "$APPDIR/usr/bin/python3" -m venv "$APPDIR/usr/pyenv"
     "$APPDIR/usr/pyenv/bin/python3" -m ensurepip --upgrade || true
     "$APPDIR/usr/pyenv/bin/python3" -m pip install -U pip wheel setuptools
-    "$APPDIR/usr/pyenv/bin/pip" install -r $APPDIR/usr/src/requirements.txt
+    "$APPDIR/usr/pyenv/bin/pip" install -r "$APPDIR/usr/src/requirements.txt"
+    "$APPDIR/usr/pyenv/bin/pip" install "uv==0.12.15"
 
-    cat > "$APPDIR/usr/src/pygpt_net/data/appimage.conf" << 'EOF'
+    cat > "$APPDIR/usr/src/pygpt_net/data/appimage.conf" << 'EOF_APPIMAGE_CONF'
     yes
-    EOF
-
+    EOF_APPIMAGE_CONF
 
   runtime:
     env:
@@ -100,7 +101,8 @@ AppDir:
       QT_PLUGIN_PATH: "$APPDIR/usr/pyenv/lib/python3.10/site-packages/PySide6/Qt/plugins"
       QT_XKB_CONFIG_ROOT: "$APPDIR/usr/share/X11/xkb"
       PYTHONPATH: "$APPDIR/usr/src:$APPDIR/usr/pyenv/lib/python3.10/site-packages"
+      PYGPT_UV_BIN: "$APPDIR/usr/pyenv/bin/uv"
 
 AppImage:
   arch: x86_64
-  update-information: "gh-releases-zsync|szczyglis-dev|py-gpt|latest|*.AppImage.zsync"
+  update-information: "gh-releases-zsync|szczyglis-dev|py-gpt|latest|PyGPT-*-x86_64.AppImage.zsync"

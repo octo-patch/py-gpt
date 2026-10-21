@@ -62,31 +62,31 @@ class Remote:
               "max_turns": Optional[int],
             }
         """
-        cfg = self.window.core.config
+        provider = self.window.core.llm.get("x_ai")
         include: List[str] = []
         tools: List[object] = []
 
         # global remote tools switch
         is_web_enabled = self.window.controller.chat.remote_tools.enabled(model, "web_search")
-        is_x_enabled = bool(cfg.get("remote_tools.xai.x_search", False))
-        is_code_enabled = bool(cfg.get("remote_tools.xai.code_execution", False))
-        is_mcp_enabled = bool(cfg.get("remote_tools.xai.mcp", False))
+        is_x_enabled = bool(provider.is_remote_tool_enabled("x_search"))
+        is_code_enabled = bool(provider.is_remote_tool_enabled("code_execution"))
+        is_mcp_enabled = bool(provider.is_remote_tool_enabled("mcp"))
 
         # include flags
         if stream:
             include.append("verbose_streaming")
-        if bool(cfg.get("remote_tools.xai.inline_citations", True)):
+        if bool(provider.get_remote_tool_config("inline_citations", True)):
             include.append("inline_citations")
-        if bool(cfg.get("remote_tools.xai.include_code_output", True)):
+        if bool(provider.get_remote_tool_config("include_code_output", True)):
             include.append("code_execution_call_output")
 
         # use_encrypted_content
-        use_encrypted = bool(cfg.get("remote_tools.xai.use_encrypted_content", False))
+        use_encrypted = bool(provider.get_remote_tool_config("use_encrypted_content", False))
 
         # optional max_turns
         max_turns = None
         try:
-            mt = cfg.get("remote_tools.xai.max_turns")
+            mt = provider.get_remote_tool_config("max_turns")
             if isinstance(mt, int) and mt > 0:
                 max_turns = int(mt)
         except Exception:
@@ -95,10 +95,10 @@ class Remote:
         # WEB SEARCH
         if is_web_enabled and x_web_search is not None:
             kwargs: Dict[str, Any] = {}
-            enable_img = bool(cfg.get("remote_tools.xai.web.enable_image_understanding", False))
+            enable_img = bool(provider.get_remote_tool_config("web.enable_image_understanding", False))
             '''
-            allowed = self._as_list(cfg.get("remote_tools.xai.web.allowed_websites"), 5)
-            excluded = self._as_list(cfg.get("remote_tools.xai.web.excluded_websites"), 5)
+            allowed = self._as_list(provider.get_remote_tool_config("web.allowed_websites"), 5)
+            excluded = self._as_list(provider.get_remote_tool_config("web.excluded_websites"), 5)
             if allowed and not excluded:
                 kwargs["allowed_domains"] = allowed
             elif excluded and not allowed:
@@ -115,34 +115,34 @@ class Remote:
         if is_x_enabled and x_x_search is not None:
             kwargs: Dict[str, Any] = {}
             '''
-            inc = self._as_list(cfg.get("remote_tools.xai.x.included_handles"), 10)
-            exc = self._as_list(cfg.get("remote_tools.xai.x.excluded_handles"), 10)
+            inc = self._as_list(provider.get_remote_tool_config("x.included_handles"), 10)
+            exc = self._as_list(provider.get_remote_tool_config("x.excluded_handles"), 10)
             if inc and not exc:
                 kwargs["allowed_x_handles"] = inc
             elif exc and not inc:
                 kwargs["excluded_x_handles"] = exc
             '''
             # optional date range filters (YYYY-MM-DD)
-            for k_in, k_out in (("remote_tools.xai.from_date", "from_date"),
-                                ("remote_tools.xai.to_date", "to_date")):
-                v = cfg.get(k_in)
+            for k_in, k_out in (("from_date", "from_date"),
+                                ("to_date", "to_date")):
+                v = provider.get_remote_tool_config(k_in)
                 if isinstance(v, str) and v.strip():
                     kwargs[k_out] = v.strip()
 
-            if bool(cfg.get("remote_tools.xai.x.enable_image_understanding", False)):
+            if bool(provider.get_remote_tool_config("x.enable_image_understanding", False)):
                 kwargs["enable_image_understanding"] = True
-            if bool(cfg.get("remote_tools.xai.x.enable_video_understanding", False)):
+            if bool(provider.get_remote_tool_config("x.enable_video_understanding", False)):
                 kwargs["enable_video_understanding"] = True
 
             # optional favorites/views filters (supported by live search)
             try:
-                favs = cfg.get("remote_tools.xai.x.min_favs")
+                favs = provider.get_remote_tool_config("x.min_favs")
                 if isinstance(favs, int) and favs > 0:
                     kwargs["post_favorite_count"] = int(favs)
             except Exception:
                 pass
             try:
-                views = cfg.get("remote_tools.xai.x.min_views")
+                views = provider.get_remote_tool_config("x.min_views")
                 if isinstance(views, int) and views > 0:
                     kwargs["post_view_count"] = int(views)
             except Exception:
@@ -163,7 +163,7 @@ class Remote:
         # MCP
         if is_mcp_enabled and x_mcp is not None:
             kwargs = {}
-            mcp_config = cfg.get("remote_tools.xai.mcp.args", "")
+            mcp_config = provider.get_remote_tool_config("mcp.args", "")
             if mcp_config:
                 try:
                     kwargs = json.loads(mcp_config)
@@ -175,8 +175,8 @@ class Remote:
                     pass
 
         # COLLECTIONS SEARCH
-        is_collections_enabled = bool(cfg.get("remote_tools.xai.collections", False))
-        ids = cfg.get("remote_tools.xai.collections.args", "")
+        is_collections_enabled = bool(provider.is_remote_tool_enabled("collections"))
+        ids = provider.get_remote_tool_config("collections.args", "")
         ids_list = []
         if ids:
             try:
@@ -227,24 +227,28 @@ class Remote:
         :param model: ModelItem (not used now)
         :return: Dict with 'sdk' and 'http' keys
         """
-        cfg = self.window.core.config
-        is_web = self.window.controller.chat.remote_tools.enabled(model, "web_search")  # get global config
+        provider = self.window.core.llm.get("x_ai")
+        remote_tools = self.window.controller.chat.remote_tools
+        is_web = (
+            remote_tools.enabled(model, "web_search")
+            and remote_tools.supported(model, "web_search")
+        )
         mode = "on" if is_web else "off"
 
         # sources toggles
-        s_web =  bool(cfg.get("remote_tools.xai.web_search", False))
-        s_x   =  bool(cfg.get("remote_tools.xai.x_search", False))
+        s_web =  bool(provider.is_remote_tool_enabled("web_search"))
+        s_x   =  bool(provider.is_remote_tool_enabled("x_search"))
 
-        adv_x_incl        = self._has_list(cfg.get("remote_tools.xai.x.included_handles"))
-        adv_x_excl        = self._has_list(cfg.get("remote_tools.xai.x.excluded_handles"))
-        adv_x_favs        = self._has_int(cfg.get("remote_tools.xai.x.min_favs"))
-        adv_x_views       = self._has_int(cfg.get("remote_tools.xai.x.min_views"))
+        adv_x_incl        = self._has_list(provider.get_remote_tool_config("x.included_handles"))
+        adv_x_excl        = self._has_list(provider.get_remote_tool_config("x.excluded_handles"))
+        adv_x_favs        = self._has_int(provider.get_remote_tool_config("x.min_favs"))
+        adv_x_views       = self._has_int(provider.get_remote_tool_config("x.min_views"))
 
-        adv_from          = self._has_str(cfg.get("remote_tools.xai.from_date"))
-        adv_to            = self._has_str(cfg.get("remote_tools.xai.to_date"))
+        adv_from          = self._has_str(provider.get_remote_tool_config("from_date"))
+        adv_to            = self._has_str(provider.get_remote_tool_config("to_date"))
 
-        adv_max_results   = self._has_int(cfg.get("remote_tools.xai.max_results"))
-        adv_return_cits   = cfg.get("remote_tools.xai.return_citations", True) is not True  # different than default?
+        adv_max_results   = self._has_int(provider.get_remote_tool_config("max_results"))
+        adv_return_cits   = provider.get_remote_tool_config("return_citations", True) is not True  # different than default?
 
         # SDK-capable if: mode!=off and ONLY X is enabled and no X filters/date/max_results customizations
         x_only = s_x and not s_web
@@ -263,7 +267,7 @@ class Remote:
             s_web
         )
         if need_http:
-            http_params = self._build_http_params(cfg, mode, s_web, s_x)
+            http_params = self._build_http_params(provider, mode, s_web, s_x)
             http_reason = "advanced_sources_or_filters"
 
         return {
@@ -271,6 +275,106 @@ class Remote:
             "sdk": {"enabled": sdk_enabled},
             "http": http_params,
             "reason": http_reason,
+        }
+
+    def build_for_responses(self, model: ModelItem = None) -> Dict[str, Any]:
+        """Build xAI Agent Tools descriptors for the OpenAI-compatible Responses API.
+
+        Live Search ``search_parameters`` on Chat Completions is deprecated by
+        xAI. Agents v2 uses these server-side tool descriptors directly on
+        ``/v1/responses`` instead.
+
+        :param model: Model item
+        :return: {"tools": [...], "include": [...]}
+        """
+        provider = self.window.core.llm.get("x_ai")
+        enabled_global = self.window.controller.chat.remote_tools.enabled
+        tools: List[dict] = []
+        include: List[str] = []
+
+        is_web_enabled = (
+            enabled_global(model, "web_search")
+            and self.window.controller.chat.remote_tools.supported(model, "web_search")
+        )
+        is_x_enabled = bool(provider.is_remote_tool_enabled("x_search"))
+        is_code_enabled = bool(provider.is_remote_tool_enabled("code_execution"))
+        is_mcp_enabled = bool(provider.is_remote_tool_enabled("mcp"))
+        is_collections_enabled = bool(provider.is_remote_tool_enabled("collections"))
+
+        if is_web_enabled:
+            tool: Dict[str, Any] = {"type": "web_search"}
+            filters: Dict[str, Any] = {}
+            allowed = self._as_list(provider.get_remote_tool_config("web.allowed_websites"), 5)
+            excluded = self._as_list(provider.get_remote_tool_config("web.excluded_websites"), 5)
+            if allowed and not excluded:
+                filters["allowed_domains"] = allowed
+            elif excluded and not allowed:
+                filters["excluded_domains"] = excluded
+            if filters:
+                tool["filters"] = filters
+            if bool(provider.get_remote_tool_config("web.enable_image_understanding", False)):
+                tool["enable_image_understanding"] = True
+            if bool(provider.get_remote_tool_config("web.enable_image_search", False)):
+                tool["enable_image_search"] = True
+            tools.append(tool)
+            include.append("web_search_call.action.sources")
+
+        if is_x_enabled:
+            tool = {"type": "x_search"}
+            inc = self._as_list(provider.get_remote_tool_config("x.included_handles"), 20)
+            exc = self._as_list(provider.get_remote_tool_config("x.excluded_handles"), 20)
+            if inc and not exc:
+                tool["allowed_x_handles"] = inc
+            elif exc and not inc:
+                tool["excluded_x_handles"] = exc
+            for cfg_key, out_key in (
+                ("from_date", "from_date"),
+                ("to_date", "to_date"),
+            ):
+                value = provider.get_remote_tool_config(cfg_key)
+                if isinstance(value, str) and value.strip():
+                    tool[out_key] = value.strip()
+            if bool(provider.get_remote_tool_config("x.enable_image_understanding", False)):
+                tool["enable_image_understanding"] = True
+            if bool(provider.get_remote_tool_config("x.enable_video_understanding", False)):
+                tool["enable_video_understanding"] = True
+            tools.append(tool)
+
+        if is_code_enabled:
+            tools.append({"type": "code_interpreter"})
+            include.append("code_interpreter_call.outputs")
+
+        if is_collections_enabled:
+            ids = provider.get_remote_tool_config("collections.args", "")
+            ids_list: List[str] = []
+            if ids:
+                try:
+                    ids_list = [value.strip() for value in ids.split(",") if value.strip()]
+                except Exception:
+                    ids_list = []
+            if ids_list:
+                # xAI calls this collections_search in the native SDK, but the
+                # OpenAI-compatible Responses API uses file_search.
+                tools.append({
+                    "type": "file_search",
+                    "vector_store_ids": ids_list,
+                })
+                include.append("file_search_call.results")
+
+        if is_mcp_enabled:
+            raw = provider.get_remote_tool_config("mcp.args", "")
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        parsed.setdefault("type", "mcp")
+                        tools.append(parsed)
+                except Exception:
+                    pass
+
+        return {
+            "tools": tools,
+            "include": list(dict.fromkeys(include)),
         }
 
     # ---------- Realtime tools (WebSocket) ----------
@@ -298,15 +402,18 @@ class Remote:
         :param preset: Preset item (unused here)
         :return: Extended tools list
         """
-        cfg = self.window.core.config
+        provider = self.window.core.llm.get("x_ai")
         enabled_global = self.window.controller.chat.remote_tools.enabled
 
         # Toggles
-        is_web_enabled = enabled_global(model, "web_search")
-        is_x_enabled = bool(cfg.get("remote_tools.xai.x_search", False))
-        is_code_enabled = bool(cfg.get("remote_tools.xai.code_execution", False))
-        is_mcp_enabled = bool(cfg.get("remote_tools.xai.mcp", False))
-        is_collections_enabled = bool(cfg.get("remote_tools.xai.collections", False))
+        is_web_enabled = (
+            enabled_global(model, "web_search")
+            and self.window.controller.chat.remote_tools.supported(model, "web_search")
+        )
+        is_x_enabled = bool(provider.is_remote_tool_enabled("x_search"))
+        is_code_enabled = bool(provider.is_remote_tool_enabled("code_execution"))
+        is_mcp_enabled = bool(provider.is_remote_tool_enabled("mcp"))
+        is_collections_enabled = bool(provider.is_remote_tool_enabled("collections"))
 
         # Web search
         if is_web_enabled:
@@ -323,7 +430,7 @@ class Remote:
 
         # Collections search
         if is_collections_enabled:
-            ids = cfg.get("remote_tools.xai.collections.args", "")
+            ids = provider.get_remote_tool_config("collections.args", "")
             ids_list: List[str] = []
             if ids:
                 try:
@@ -338,7 +445,7 @@ class Remote:
 
         # MCP
         if is_mcp_enabled:
-            mcp_tool = cfg.get("remote_tools.xai.mcp.args", "")
+            mcp_tool = provider.get_remote_tool_config("mcp.args", "")
             if mcp_tool:
                 try:
                     parsed = json.loads(mcp_tool)
@@ -356,7 +463,7 @@ class Remote:
 
     def _build_http_params(
             self,
-            cfg,
+            provider,
             mode: str,
             s_web: bool,
             s_x: bool,
@@ -364,7 +471,7 @@ class Remote:
         """
         Build search_parameters for Chat Completions (HTTP).
 
-        :param cfg: Config dict
+        :param provider: LLM provider
         :param mode: "auto"|"on"|"off"
         :param s_web: Include web search
         :param s_x: Include X search
@@ -372,18 +479,18 @@ class Remote:
         """
         params: Dict[str, Any] = {"mode": mode}
 
-        rc = cfg.get("remote_tools.xai.return_citations")
+        rc = provider.get_remote_tool_config("return_citations")
         if rc is None:
             rc = True
         params["return_citations"] = bool(rc)
 
-        msr = cfg.get("remote_tools.xai.max_results")
+        msr = provider.get_remote_tool_config("max_results")
         if isinstance(msr, int) and msr > 0:
             params["max_search_results"] = int(msr)
 
-        for k_cfg, k_out in (("remote_tools.xai.from_date", "from_date"),
-                             ("remote_tools.xai.to_date", "to_date")):
-            val = cfg.get(k_cfg)
+        for k_cfg, k_out in (("from_date", "from_date"),
+                             ("to_date", "to_date")):
+            val = provider.get_remote_tool_config(k_cfg)
             if isinstance(val, str) and val.strip():
                 params[k_out] = val.strip()
 
@@ -391,30 +498,30 @@ class Remote:
 
         if s_web:
             web: Dict[str, Any] = {"type": "web"}
-            country = cfg.get("remote_tools.xai.web.country")
+            country = provider.get_remote_tool_config("web.country")
             if isinstance(country, str) and len(country.strip()) == 2:
                 web["country"] = country.strip().upper()
-            allowed = self._as_list(cfg.get("remote_tools.xai.web.allowed_websites"), 5)
-            excluded = self._as_list(cfg.get("remote_tools.xai.web.excluded_websites"), 5)
+            allowed = self._as_list(provider.get_remote_tool_config("web.allowed_websites"), 5)
+            excluded = self._as_list(provider.get_remote_tool_config("web.excluded_websites"), 5)
             if allowed:
                 web["allowed_websites"] = allowed
             elif excluded:
                 web["excluded_websites"] = excluded
-            safe = cfg.get("remote_tools.xai.web.safe_search")
+            safe = provider.get_remote_tool_config("web.safe_search")
             if safe is not None:
                 web["safe_search"] = bool(safe)
             sources.append(web)
 
         if s_x:
             xsrc: Dict[str, Any] = {"type": "x"}
-            inc = self._as_list(cfg.get("remote_tools.xai.x.included_handles"), 10)
-            exc = self._as_list(cfg.get("remote_tools.xai.x.excluded_handles"), 10)
+            inc = self._as_list(provider.get_remote_tool_config("x.included_handles"), 10)
+            exc = self._as_list(provider.get_remote_tool_config("x.excluded_handles"), 10)
             if inc and not exc:
                 xsrc["included_x_handles"] = inc
             elif exc and not inc:
                 xsrc["excluded_x_handles"] = exc
-            favs = cfg.get("remote_tools.xai.x.min_favs")
-            views = cfg.get("remote_tools.xai.x.min_views")
+            favs = provider.get_remote_tool_config("x.min_favs")
+            views = provider.get_remote_tool_config("x.min_views")
             if isinstance(favs, int) and favs > 0:
                 xsrc["post_favorite_count"] = int(favs)
             if isinstance(views, int) and views > 0:

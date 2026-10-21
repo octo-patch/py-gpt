@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.03 17:00:00                  #
+# Updated Date: 2026.09.18 19:10:00                  #
 # ================================================== #
 
 import datetime
@@ -23,6 +23,50 @@ from pygpt_net.utils import trans
 
 
 class ContextList(BaseList):
+    # Theme-facing colors used by ImportantItemDelegate. They are intentionally
+    # exposed as Qt properties so QSS owns the palette while Python owns only
+    # interaction state. Null defaults fall back to the active Qt palette when
+    # no stylesheet provides an override.
+    _normal_text_color = QColor()
+    _hover_text_color = QColor()
+    _active_text_color = QColor()
+    _focused_selected_text_color = QColor()
+    _show_more_hover_text_color = QColor()
+
+    def _set_theme_color(self, attr, value):
+        color = QColor(value) if not isinstance(value, QColor) else QColor(value)
+        setattr(self, attr, color)
+        try:
+            self.viewport().update()
+        except Exception:
+            pass
+
+    normalTextColor = QtCore.Property(
+        QColor,
+        lambda self: self._normal_text_color,
+        lambda self, value: self._set_theme_color("_normal_text_color", value),
+    )
+    hoverTextColor = QtCore.Property(
+        QColor,
+        lambda self: self._hover_text_color,
+        lambda self, value: self._set_theme_color("_hover_text_color", value),
+    )
+    activeTextColor = QtCore.Property(
+        QColor,
+        lambda self: self._active_text_color,
+        lambda self, value: self._set_theme_color("_active_text_color", value),
+    )
+    focusedSelectedTextColor = QtCore.Property(
+        QColor,
+        lambda self: self._focused_selected_text_color,
+        lambda self, value: self._set_theme_color("_focused_selected_text_color", value),
+    )
+    showMoreHoverTextColor = QtCore.Property(
+        QColor,
+        lambda self: self._show_more_hover_text_color,
+        lambda self, value: self._set_theme_color("_show_more_hover_text_color", value),
+    )
+
     def __init__(self, window=None, id=None):
         """
         Context select menu
@@ -34,8 +78,25 @@ class ContextList(BaseList):
         self.window = window
         self.id = id
         self.expanded_items = set()
+        # Runtime-only visual expansion state for capped pinned/project/context
+        # lists. The underlying context data remains fully loaded.
+        self.show_all_pinned = False
+        self.show_all_projects = False
+        self.show_all_project_contexts = set()
+        # Track an explicit user collapse separately from automatic reveal of
+        # the currently active pinned/project context. This makes the trailing "less"
+        # action authoritative even when the active row is beyond the cap.
+        self.pinned_limit_collapsed_by_user = False
+        self.projects_limit_collapsed_by_user = False
+        self.project_contexts_limit_collapsed_by_user = set()
+        # Top-level context-list sections (Pinned / Projects / Recent) have
+        # their own persisted collapsed state. Missing/invalid config values
+        # intentionally mean "all expanded" for backward compatibility.
+        self.collapsed_sections = self._load_collapsed_sections()
+        self._section_visibility_updating = False
         self._icons = {
             'add': QIcon(":/icons/add.svg"),
+            'new_chat': QIcon(":/icons/new_chat.svg"),
             'edit': QIcon(":/icons/edit.svg"),
             'delete': QIcon(":/icons/delete.svg"),
             'chat': QIcon(":/icons/chat.svg"),
@@ -64,7 +125,24 @@ class ContextList(BaseList):
 
         # Use a custom delegate for labels/pinned/attachment indicators and group border indicator
         # Pass both: attachment icon and pin icon (pin2.svg) for pinned indicator rendering
-        self.setItemDelegate(ImportantItemDelegate(self, self._icons['attachment'], self._icons['pin']))
+        self.setItemDelegate(ImportantItemDelegate(
+            self,
+            self._icons['attachment'],
+            self._icons['pin'],
+            self._icons['new_chat'],
+        ))
+
+        # Hover actions. The delegate replaces the project context counter with
+        # add.svg on project rows and shows add.svg on actionable section
+        # headers (Projects / Recent). Mouse tracking is required so these
+        # states update without a pressed mouse button.
+        self._hover_group_index: QPersistentModelIndex | None = None
+        self._hover_section_action_index: QPersistentModelIndex | None = None
+        self.setMouseTracking(True)
+        try:
+            self.viewport().setMouseTracking(True)
+        except Exception:
+            pass
 
         # Ensure context menu works as before
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -164,6 +242,7 @@ class ContextList(BaseList):
                 self.expanded_items.add(item.id)
         except Exception:
             pass
+        QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
 
     def _on_group_collapsed(self, index: QtCore.QModelIndex):
         """
@@ -175,11 +254,14 @@ class ContextList(BaseList):
                 self.expanded_items.discard(item.id)
         except Exception:
             pass
+        QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
 
     def _on_vertical_scroll(self, value: int):
         """
         Trigger infinite scroll: when scrollbar reaches bottom, request the next page.
         """
+        if self._section_visibility_updating or 'recent' in self.collapsed_sections:
+            return
         try:
             sb = self.verticalScrollBar()
         except Exception:
@@ -353,10 +435,13 @@ class ContextList(BaseList):
 
     def _on_rows_removed(self, parent, start, end):
         """
-        Rows removed; schedule scroll restoration.
+        Rows removed; schedule scroll restoration and clear any implicit parent
+        project selection created by Qt after deleting a child context.
         """
         if self._scroll_guard_active or self._deletion_initiated:
             self._schedule_scroll_restore()
+        if self._deletion_initiated:
+            QtCore.QTimer.singleShot(0, self._clear_group_selection_after_delete)
 
     def _on_model_about_to_be_reset(self):
         """
@@ -368,10 +453,13 @@ class ContextList(BaseList):
 
     def _on_model_reset(self):
         """
-        Model has been reset; restore scroll if we armed the guard.
+        Model has been reset; restore scroll if we armed the guard and clear any
+        implicit parent-project selection caused by a delete-driven rebuild.
         """
         if self._scroll_guard_active or self._deletion_initiated:
             self._schedule_scroll_restore()
+        if self._deletion_initiated:
+            QtCore.QTimer.singleShot(0, self._clear_group_selection_after_delete)
 
     def _on_layout_about_to_change(self):
         """
@@ -383,10 +471,13 @@ class ContextList(BaseList):
 
     def _on_layout_changed(self):
         """
-        Layout changed; restore scroll if guard is active.
+        Layout changed; restore scroll if guard is active and clear any implicit
+        parent-project selection caused by a delete-driven layout update.
         """
         if self._scroll_guard_active or self._deletion_initiated:
             self._schedule_scroll_restore()
+        if self._deletion_initiated:
+            QtCore.QTimer.singleShot(0, self._clear_group_selection_after_delete)
 
     def scrollTo(self, index, hint=QAbstractItemView.EnsureVisible):
         """
@@ -570,6 +661,200 @@ class ContextList(BaseList):
         it = self._model.itemFromIndex(index)
         return bool(isinstance(it, GroupItem))
 
+    def _is_show_more_index(self, index: QtCore.QModelIndex) -> bool:
+        """Return True if index points to a visual capped-list expander row."""
+        try:
+            if not index.isValid():
+                return False
+            return isinstance(self._model.itemFromIndex(index), ShowMoreItem)
+        except Exception:
+            return False
+
+    def _update_show_more_cursor(self, index: QtCore.QModelIndex):
+        """Use link-style pointer feedback for every Show more/less control."""
+        try:
+            if self._is_show_more_index(index):
+                self.viewport().setCursor(Qt.PointingHandCursor)
+            else:
+                self.viewport().unsetCursor()
+        except Exception:
+            pass
+
+    def _handle_show_more_click(self, index: QtCore.QModelIndex) -> bool:
+        """Expand or collapse a capped pinned/project/project-context list."""
+        if not self._is_show_more_index(index):
+            return False
+        try:
+            item = self._model.itemFromIndex(index)
+            if item.scope == ShowMoreItem.NEW_PROJECT:
+                self.window.controller.ctx.new_group()
+                return True
+            if item.scope == ShowMoreItem.PINNED:
+                if item.collapse:
+                    self.show_all_pinned = False
+                    self.pinned_limit_collapsed_by_user = True
+                else:
+                    self.show_all_pinned = True
+                    self.pinned_limit_collapsed_by_user = False
+            elif item.scope == ShowMoreItem.PROJECTS:
+                if item.collapse:
+                    self.show_all_projects = False
+                    self.projects_limit_collapsed_by_user = True
+                else:
+                    self.show_all_projects = True
+                    self.projects_limit_collapsed_by_user = False
+            elif item.scope == ShowMoreItem.PROJECT_CONTEXTS and item.group_id is not None:
+                group_id = int(item.group_id)
+                if item.collapse:
+                    self.show_all_project_contexts.discard(group_id)
+                    self.project_contexts_limit_collapsed_by_user.add(group_id)
+                else:
+                    self.show_all_project_contexts.add(group_id)
+                    self.project_contexts_limit_collapsed_by_user.discard(group_id)
+            else:
+                return False
+
+            # Rebuild from already-loaded meta only. This is intentionally a
+            # presentation toggle and must not trigger another DB page load.
+            self.window.controller.ctx.update_list(reload=False, restore_scroll=True)
+            QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
+            return True
+        except Exception:
+            return False
+
+    def _is_section_action_index(self, index: QtCore.QModelIndex) -> bool:
+        """Return True if index points to an actionable top-level section row."""
+        try:
+            if not index.isValid() or index.parent().isValid():
+                return False
+            item = self._model.itemFromIndex(index)
+            return isinstance(item, SectionItem) and bool(getattr(item, 'action', None))
+        except Exception:
+            return False
+
+    def _is_collapsible_section_index(self, index: QtCore.QModelIndex) -> bool:
+        """Return True if index points to a collapsible top-level section row."""
+        try:
+            if not index.isValid() or index.parent().isValid():
+                return False
+            item = self._model.itemFromIndex(index)
+            return bool(
+                isinstance(item, SectionItem)
+                and getattr(item, 'section_key', None)
+            )
+        except Exception:
+            return False
+
+    def is_section_collapsed(self, index: QtCore.QModelIndex) -> bool:
+        """Return True when the supplied top-level section is collapsed."""
+        try:
+            if not index.isValid() or not self._is_collapsible_section_index(index):
+                return False
+            item = self._model.itemFromIndex(index)
+            section_key = getattr(item, 'section_key', None)
+            return bool(section_key and section_key in self.collapsed_sections)
+        except Exception:
+            return False
+
+    def _load_collapsed_sections(self) -> set[str]:
+        """Load persisted collapsed section IDs; missing config means expanded."""
+        try:
+            value = self.window.core.config.get('ctx.list.sections.collapsed', [])
+        except Exception:
+            value = []
+        if not isinstance(value, (list, tuple, set)):
+            return set()
+        allowed = {'pinned', 'projects', 'recent'}
+        return {str(section) for section in value if str(section) in allowed}
+
+    def _save_collapsed_sections(self):
+        """Persist collapsed top-level section IDs."""
+        try:
+            self.window.core.config.set(
+                'ctx.list.sections.collapsed',
+                sorted(self.collapsed_sections),
+            )
+            self.window.core.config.save()
+        except Exception:
+            pass
+
+    def apply_section_visibility(self):
+        """Apply persisted collapsed state to all top-level section row ranges."""
+        model = self.model()
+        if model is None:
+            return
+
+        self._section_visibility_updating = True
+        try:
+            headers = []
+            for row in range(model.rowCount()):
+                item = model.item(row) if hasattr(model, 'item') else None
+                if isinstance(item, SectionItem) and getattr(item, 'section_key', None):
+                    headers.append((row, item.section_key))
+
+            root = QtCore.QModelIndex()
+            for i, (header_row, section_key) in enumerate(headers):
+                next_header_row = headers[i + 1][0] if i + 1 < len(headers) else model.rowCount()
+                last_row = next_header_row - 1
+
+                # The empty spacer immediately before the next section visually
+                # belongs to that next header, so keep it visible even when the
+                # preceding section is collapsed.
+                if last_row > header_row:
+                    tail = model.item(last_row) if hasattr(model, 'item') else None
+                    if (
+                        isinstance(tail, SectionItem)
+                        and not getattr(tail, 'section_key', None)
+                        and not getattr(tail, 'title', '')
+                    ):
+                        last_row -= 1
+
+                hidden = section_key in self.collapsed_sections
+                for row in range(header_row + 1, last_row + 1):
+                    self.setRowHidden(row, root, hidden)
+
+                # Header and the next-section spacer must always stay visible.
+                self.setRowHidden(header_row, root, False)
+                if last_row + 1 < next_header_row:
+                    self.setRowHidden(last_row + 1, root, False)
+        finally:
+            self._section_visibility_updating = False
+
+    def _section_label_rect(self, index: QtCore.QModelIndex) -> QtCore.QRect:
+        """Return the clickable rectangle occupied by a section's left label."""
+        if not index.isValid() or not self._is_collapsible_section_index(index):
+            return QtCore.QRect()
+        try:
+            delegate = self.itemDelegate()
+            if hasattr(delegate, 'section_label_rect'):
+                return delegate.section_label_rect(index, self.visualRect(index))
+        except Exception:
+            pass
+        return QtCore.QRect()
+
+    def _handle_section_toggle_click(self, index: QtCore.QModelIndex, pos: QtCore.QPoint) -> bool:
+        """Toggle a top-level section only when its left text label is clicked."""
+        if not index.isValid() or not self._is_collapsible_section_index(index):
+            return False
+        if not self._section_label_rect(index).contains(pos):
+            return False
+
+        try:
+            item = self._model.itemFromIndex(index)
+            section_key = getattr(item, 'section_key', None)
+            if not section_key:
+                return False
+            if section_key in self.collapsed_sections:
+                self.collapsed_sections.discard(section_key)
+            else:
+                self.collapsed_sections.add(section_key)
+            self.apply_section_visibility()
+            self._save_collapsed_sections()
+            QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
+            return True
+        except Exception:
+            return False
+
     def _can_toggle_with_ctrl(self, index: QtCore.QModelIndex) -> bool:
         """
         Returns True if Ctrl-toggle on the given index would not mix selection types.
@@ -600,19 +885,46 @@ class ContextList(BaseList):
     def _on_selection_changed(self, selected, deselected):
         """
         Keep selection homogeneous by removing indices of the opposite type.
+
+        Project rows are valid persistent selection targets only when selected
+        explicitly through Ctrl/Shift multi-selection. Plain clicks are handled
+        separately in mousePressEvent()/selectionCommand() and do not select a
+        project row.
         """
         types = self._selection_types()
         if len(types) <= 1:
             return
-        # Decide desired type: prefer the last selection target if known, else majority
+
+        # Prefer the last explicit target type; otherwise keep the majority.
         if self._last_selection_target_is_group is not None:
             want_groups = bool(self._last_selection_target_is_group)
         else:
-            # Majority fallback
             g = len(self._selected_group_ids())
             i = len(self._selected_item_ids())
             want_groups = g >= i
         self._prune_selection_to_type(want_groups)
+
+    def _clear_group_selection_after_delete(self):
+        """
+        Remove Qt's implicit fallback selection of a parent project after a
+        destructive model update (for example deleting a context from a project).
+
+        Explicit Ctrl/Shift project selection is unaffected during normal use;
+        this cleanup is only scheduled from delete-related model-change handlers.
+        """
+        try:
+            if not self._deletion_initiated:
+                return
+            sel = self.selectionModel()
+            if not sel:
+                return
+            for idx in list(self._selected_rows()):
+                if self._is_group_index(idx):
+                    sel.select(idx, QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
+            if self.currentIndex().isValid() and self._is_group_index(self.currentIndex()):
+                self.setCurrentIndex(QtCore.QModelIndex())
+        except Exception:
+            pass
 
     def _perform_item_activation(self, index: QtCore.QModelIndex):
         """
@@ -694,11 +1006,258 @@ class ContextList(BaseList):
             except Exception:
                 return QtCore.QPoint()
 
+    def _same_index(self, persistent_index, index: QtCore.QModelIndex) -> bool:
+        """Return True when a persistent index points to the given model index."""
+        try:
+            return bool(
+                persistent_index is not None
+                and persistent_index.isValid()
+                and index.isValid()
+                and persistent_index.model() is index.model()
+                and persistent_index.row() == index.row()
+                and persistent_index.column() == index.column()
+                and persistent_index.parent() == index.parent()
+            )
+        except Exception:
+            return False
+
+    def _index_under_cursor(self) -> QtCore.QModelIndex:
+        """Return the model index currently under the physical mouse cursor."""
+        try:
+            viewport = self.viewport()
+            pos = viewport.mapFromGlobal(QtGui.QCursor.pos())
+            if not viewport.rect().contains(pos):
+                return QtCore.QModelIndex()
+            return self.indexAt(pos)
+        except Exception:
+            return QtCore.QModelIndex()
+
+    def is_group_hovered(self, index: QtCore.QModelIndex) -> bool:
+        """Return True when the pointer currently hovers the given project row."""
+        # Resolve hover from the real cursor position first. This is important
+        # after expand/collapse or a model rebuild: Qt may repaint the row while
+        # the mouse stays perfectly still, so no mouseMoveEvent is generated and
+        # a cached/persistent hover index can temporarily become stale.
+        cursor_index = self._index_under_cursor()
+        if cursor_index.isValid():
+            return self._same_index(QPersistentModelIndex(cursor_index), index)
+        return False
+
+    def is_section_action_hovered(self, index: QtCore.QModelIndex) -> bool:
+        """Return True when the pointer currently hovers an actionable section row."""
+        # Collapsed sections intentionally expose the total item counter on
+        # the right instead of add.svg, regardless of hover state.
+        if self.is_section_collapsed(index):
+            return False
+        cursor_index = self._index_under_cursor()
+        if cursor_index.isValid() and self._is_section_action_index(cursor_index):
+            return self._same_index(QPersistentModelIndex(cursor_index), index)
+        return False
+
+    def _refresh_hover_from_cursor(self):
+        """Synchronize cached hover state with the current physical cursor position."""
+        index = self._index_under_cursor()
+        self._set_hover_group_index(index)
+        self._set_hover_section_action_index(index)
+        self._update_show_more_cursor(index)
+
+    def _repaint_index(self, index):
+        """Request repaint only for the supplied row when it is still valid."""
+        try:
+            if index is not None and index.isValid():
+                rect = self.visualRect(index)
+                if rect.isValid():
+                    self.viewport().update(rect)
+        except Exception:
+            pass
+
+    def _set_hover_group_index(self, index: QtCore.QModelIndex):
+        """Update the currently hovered project row and repaint old/new rows."""
+        new_index = None
+        if index.isValid() and self._is_group_index(index):
+            new_index = QPersistentModelIndex(index)
+
+        if new_index is not None:
+            if self._same_index(self._hover_group_index, index):
+                return
+        elif self._hover_group_index is None:
+            return
+
+        old_index = self._hover_group_index
+        self._hover_group_index = new_index
+        self._repaint_index(old_index)
+        self._repaint_index(new_index)
+
+    def _clear_hover_group(self):
+        """Clear project-row hover state and restore the normal counter."""
+        if self._hover_group_index is None:
+            return
+        old_index = self._hover_group_index
+        self._hover_group_index = None
+        self._repaint_index(old_index)
+
+    def _set_hover_section_action_index(self, index: QtCore.QModelIndex):
+        """Update the hovered actionable section and repaint old/new rows."""
+        new_index = None
+        if index.isValid() and self._is_section_action_index(index):
+            new_index = QPersistentModelIndex(index)
+
+        if new_index is not None:
+            if self._same_index(self._hover_section_action_index, index):
+                return
+        elif self._hover_section_action_index is None:
+            return
+
+        old_index = self._hover_section_action_index
+        self._hover_section_action_index = new_index
+        self._repaint_index(old_index)
+        self._repaint_index(new_index)
+
+    def _clear_hover_section_action(self):
+        """Clear section-header hover action state."""
+        if self._hover_section_action_index is None:
+            return
+        old_index = self._hover_section_action_index
+        self._hover_section_action_index = None
+        self._repaint_index(old_index)
+
+    def _group_add_rect(self, index: QtCore.QModelIndex) -> QtCore.QRect:
+        """Return the clickable add-icon rectangle for a project row."""
+        if not index.isValid() or not self._is_group_index(index):
+            return QtCore.QRect()
+        try:
+            delegate = self.itemDelegate()
+            if hasattr(delegate, 'group_add_rect'):
+                return delegate.group_add_rect(self.visualRect(index))
+        except Exception:
+            pass
+        return QtCore.QRect()
+
+    def _section_add_rect(self, index: QtCore.QModelIndex) -> QtCore.QRect:
+        """Return the clickable add-icon rectangle for an actionable section row."""
+        if not index.isValid() or not self._is_section_action_index(index):
+            return QtCore.QRect()
+        try:
+            delegate = self.itemDelegate()
+            if hasattr(delegate, 'section_add_rect'):
+                return delegate.section_add_rect(self.visualRect(index))
+        except Exception:
+            pass
+        return QtCore.QRect()
+
+    def _handle_section_add_click(self, index: QtCore.QModelIndex, pos: QtCore.QPoint) -> bool:
+        """Run the add action exposed by a Projects/Recent section header."""
+        if not index.isValid() or not self._is_section_action_index(index):
+            return False
+        if self.is_section_collapsed(index):
+            return False
+        if not self.is_section_action_hovered(index):
+            return False
+        if not self._section_add_rect(index).contains(pos):
+            return False
+
+        try:
+            item = self._model.itemFromIndex(index)
+            action = getattr(item, 'action', None)
+            if action == 'new_project':
+                self.window.controller.ctx.new_group()
+            elif action == 'new_context':
+                # Always create outside a project, even if the controller still
+                # remembers a previously active project.
+                self.window.controller.ctx.new_ungrouped()
+            else:
+                return False
+
+            QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
+            return True
+        except Exception:
+            return False
+
+    def _handle_group_add_click(self, index: QtCore.QModelIndex, pos: QtCore.QPoint) -> bool:
+        """Create a new context in a project when its hover add icon is clicked."""
+        if not index.isValid() or not self._is_group_index(index):
+            return False
+        if not self.is_group_hovered(index):
+            return False
+        if not self._group_add_rect(index).contains(pos):
+            return False
+
+        try:
+            item = self._model.itemFromIndex(index)
+            if item is None or not isinstance(item, GroupItem):
+                return False
+            group_id = item.id
+
+            # Expand immediately and persist the state before the list is rebuilt
+            # by creation of the new context.
+            self.expanded_items.add(group_id)
+            self.expand(index)
+            self.window.controller.ctx.new_in_group(force=False, group_id=group_id)
+
+            # new_in_group can rebuild the list and invalidate the cached
+            # persistent index while the mouse has not moved at all.
+            QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
+            return True
+        except Exception:
+            return False
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             pos = self._event_pos_to_point(event)
             index = self.indexAt(pos)
+
+            # Visual capped-list controls are handled manually because they use
+            # the same disabled/header styling as section labels.
+            if self._handle_show_more_click(index):
+                event.accept()
+                return
+
+            # Section-header add icons are independent actions. Consume the
+            # click before section collapsing so add.svg never toggles a section.
+            if self._handle_section_add_click(index, pos):
+                event.accept()
+                return
+
+            # Only the left text label toggles a whole Pinned / Projects /
+            # Recent section. Clicking empty header space intentionally does
+            # nothing.
+            if self._handle_section_toggle_click(index, pos):
+                event.accept()
+                return
+            if self._is_collapsible_section_index(index):
+                event.accept()
+                return
+
+            # The project-row add icon is an independent action. Consume the
+            # click here so the ordinary row click does not toggle/collapse the
+            # project at the same time.
+            if self._handle_group_add_click(index, pos):
+                event.accept()
+                return
+
             no_mod = (event.modifiers() == Qt.NoModifier)
+
+            # A plain click on a project is navigation only: it may expand or
+            # collapse the project, but must not create a persistent row
+            # selection. Ctrl/Shift are intentionally excluded here so project
+            # rows can still participate in explicit multi-selection.
+            if no_mod and index.isValid() and self._is_group_index(index):
+                self._last_selection_target_is_group = None
+                self._drag_pending_from_multi = False
+                self._drag_press_index = None
+                self._force_single_click_index = None
+                self._suppress_item_click = False
+
+                # If projects were explicitly multi-selected before, a normal
+                # click exits that project selection. Existing context selection
+                # is left untouched.
+                sel = self.selectionModel()
+                if sel and self._selection_types() == {'group'}:
+                    sel.clearSelection()
+
+                super().mousePressEvent(event)
+                return
+
             had_multi = self._has_multi_selection()
             self._drag_press_pos = pos
             self._drag_press_index = QPersistentModelIndex(index) if index.isValid() else None
@@ -803,11 +1362,16 @@ class ContextList(BaseList):
                 return
             multi_items = len(self._selected_item_ids()) > 1
             multi_groups = len(self._selected_group_ids()) > 1
+            # Project rows are never persistently selected. Right-clicking a
+            # project opens its menu from the index under the cursor while the
+            # existing context selection remains untouched.
+            if index.isValid() and self._is_group_index(index):
+                self._backup_selection = list(sel.selectedIndexes())
             # Keep current multi-selection if right-click happens on one of the selected rows
-            if index.isValid() and sel.isSelected(index) and (multi_items or multi_groups):
+            elif index.isValid() and sel.isSelected(index) and (multi_items or multi_groups):
                 self._backup_selection = list(sel.selectedIndexes())
             else:
-                # Default: right-click selects the row under cursor for single-row context actions
+                # Default for contexts: right-click selects the row under cursor for single-row actions
                 self._backup_selection = list(sel.selectedIndexes())
                 if index.isValid():
                     sel.clearSelection()
@@ -818,11 +1382,20 @@ class ContextList(BaseList):
 
     def mouseMoveEvent(self, event):
         """
-        Manual drag start when multiple items are selected and user drags a selected row.
+        Update row/header hover actions and handle manual multi-item drag start.
         """
+        pos = self._event_pos_to_point(event)
+
+        # Keep hover active also while the mouse button is pressed. Previously
+        # any tiny movement during a click cleared the hover state and the count
+        # came back until the next no-button mouseMoveEvent.
+        hover_index = self.indexAt(pos)
+        self._set_hover_group_index(hover_index)
+        self._set_hover_section_action_index(hover_index)
+        self._update_show_more_cursor(hover_index)
+
         try:
             if (event.buttons() & Qt.LeftButton) and self._drag_pending_from_multi and not self._is_group_index(self._drag_press_index or QtCore.QModelIndex()):
-                pos = self._event_pos_to_point(event)
                 if (pos - self._drag_press_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
                     self._drag_pending_from_multi = False
                     self.startDrag(Qt.MoveAction)
@@ -833,14 +1406,110 @@ class ContextList(BaseList):
             self._drag_pending_from_multi = False
         super().mouseMoveEvent(event)
 
+    def viewportEvent(self, event):
+        """Handle viewport repaint and add-action tooltips."""
+        if event.type() == QtCore.QEvent.ToolTip:
+            pos = self._event_pos_to_point(event)
+            index = self.indexAt(pos)
+            tooltip = None
+            tooltip_rect = QtCore.QRect()
+
+            if index.isValid():
+                if self._is_group_index(index):
+                    tooltip_rect = self._group_add_rect(index)
+                    if tooltip_rect.contains(pos):
+                        tooltip = trans('ctx.add.new_context.tooltip')
+                elif self._is_section_action_index(index) and not self.is_section_collapsed(index):
+                    tooltip_rect = self._section_add_rect(index)
+                    if tooltip_rect.contains(pos):
+                        try:
+                            item = self._model.itemFromIndex(index)
+                            action = getattr(item, 'action', None)
+                            if action == 'new_project':
+                                tooltip = trans('ctx.add.new_project.tooltip')
+                            elif action == 'new_context':
+                                tooltip = trans('ctx.add.new_context.tooltip')
+                        except Exception:
+                            tooltip = None
+
+            if tooltip:
+                try:
+                    global_pos = event.globalPosition().toPoint()
+                except Exception:
+                    global_pos = QtGui.QCursor.pos()
+                QtWidgets.QToolTip.showText(
+                    global_pos,
+                    tooltip,
+                    self.viewport(),
+                    tooltip_rect,
+                )
+                return True
+
+            QtWidgets.QToolTip.hideText()
+
+        return super().viewportEvent(event)
+
+    def leaveEvent(self, event):
+        """Clear row/header hover actions when the pointer leaves the ctx list."""
+        self._clear_hover_group()
+        self._clear_hover_section_action()
+        try:
+            self.viewport().unsetCursor()
+        except Exception:
+            pass
+        self.viewport().update()
+        super().leaveEvent(event)
+
     def mouseReleaseEvent(self, event):
         """
-        Clean up drag state on release.
+        Clean up drag state on release and preserve hover without requiring
+        an additional mouse movement.
         """
         if event.button() == Qt.LeftButton and self._drag_pending_from_multi:
             self._drag_pending_from_multi = False
             self._drag_press_index = None
         super().mouseReleaseEvent(event)
+
+        # clicked/expanded/collapsed handlers can repaint or rebuild the model
+        # during super().mouseReleaseEvent(). Re-resolve hover from QCursor so
+        # the add icon remains visible under a stationary mouse pointer.
+        self._refresh_hover_from_cursor()
+        QtCore.QTimer.singleShot(0, self._refresh_hover_from_cursor)
+
+    @staticmethod
+    def _get_common_project_group_id(ctx_list) -> int | None:
+        """Return a project ID when every selected context belongs to the same project."""
+        if not ctx_list:
+            return None
+        group_ids = set()
+        for ctx in ctx_list:
+            group_id = getattr(ctx, "group_id", None)
+            if group_id is None:
+                return None
+            try:
+                group_id = int(group_id)
+            except (TypeError, ValueError):
+                return None
+            if group_id <= 0:
+                return None
+            group_ids.add(group_id)
+            if len(group_ids) > 1:
+                return None
+        return next(iter(group_ids)) if group_ids else None
+
+    @staticmethod
+    def _get_ctx_store_indexes(ctx, store: str) -> set[str]:
+        """Return index IDs currently tracked for a context in the selected store."""
+        indexes = getattr(ctx, "indexes", None)
+        if not isinstance(indexes, dict):
+            return set()
+        store_indexes = indexes.get(store, {})
+        if isinstance(store_indexes, dict):
+            return {str(idx) for idx in store_indexes.keys()}
+        # Compatibility with older/alternate serialized forms.
+        if isinstance(store_indexes, (list, tuple, set)):
+            return {str(idx) for idx in store_indexes}
+        return set()
 
     def _build_multi_context_menu(self, ids: list[int]) -> QMenu:
         """
@@ -898,29 +1567,57 @@ class ContextList(BaseList):
         idx_menu = QMenu(trans('action.idx'), self)
         idxs = self.window.core.config.get('llama.idx.list')
         store = self.window.core.idx.get_current_store()
+        project_group_id = self._get_common_project_group_id(ctx_list)
+        project_idx = None
+        indexed_by_ctx = [self._get_ctx_store_indexes(c, store) for c in ctx_list]
+        has_index_target = False
 
-        # Provide all available "index to" targets
+        # A project-local target is available only when every selected context
+        # belongs to the same project. Hide it when every selected context is
+        # already tracked in that project index; it will then be available only
+        # in the "Remove from index" section below.
+        if project_group_id is not None:
+            project_idx = self.window.core.idx.project.get_idx_id(project_group_id)
+            if not indexed_by_ctx or not all(project_idx in current for current in indexed_by_ctx):
+                action = idx_menu.addAction(
+                    self._icons['db'],
+                    "IDX: " + trans('idx.current_project'),
+                )
+                action.triggered.connect(functools.partial(self.action_idx, ids, project_idx))
+                has_index_target = True
+
+        # Provide configured global "index to" targets only when at least one
+        # selected context is not already indexed there.
         if idxs:
             for idx_dict in idxs:
-                index_id = idx_dict['id']
+                index_id = str(idx_dict['id'])
+                if indexed_by_ctx and all(index_id in current for current in indexed_by_ctx):
+                    continue
                 name = idx_dict['name'] + " (" + idx_dict['id'] + ")"
                 action = idx_menu.addAction(self._icons['db'], "IDX: " + name)
                 action.triggered.connect(functools.partial(self.action_idx, ids, index_id))
+                has_index_target = True
 
-            # Provide "remove from" for the union of indexes over the current store
-            union_store_indexes = set()
-            for c in ctx_list:
-                if getattr(c, "indexed", None) and getattr(c, "indexes", None):
-                    if store in c.indexes:
-                        for sidx in c.indexes[store]:
-                            union_store_indexes.add(sidx)
-            if union_store_indexes:
+        # Provide "remove from" for the union of indexes over the current store.
+        union_store_indexes = set().union(*indexed_by_ctx) if indexed_by_ctx else set()
+        if union_store_indexes:
+            if has_index_target:
                 idx_menu.addSeparator()
-                for store_index in sorted(union_store_indexes):
-                    action = idx_menu.addAction(self._icons['delete'], trans("action.idx.remove") + ": " + store_index)
-                    action.triggered.connect(
-                        functools.partial(self.action_idx_remove, store_index, ids)
-                    )
+            for store_index in sorted(union_store_indexes):
+                display_idx = (
+                    trans('idx.current_project')
+                    if project_idx is not None and store_index == project_idx
+                    else store_index
+                )
+                action = idx_menu.addAction(
+                    self._icons['delete'],
+                    trans("action.idx.remove") + ": " + display_idx,
+                )
+                action.triggered.connect(
+                    functools.partial(self.action_idx_remove, store_index, ids)
+                )
+
+        if has_index_target or union_store_indexes:
             menu.addMenu(idx_menu)
 
         # Group operations
@@ -963,11 +1660,11 @@ class ContextList(BaseList):
         """
         menu = QMenu(self)
 
-        a_new = menu.addAction(self._icons['add'], trans('action.ctx.new'))
+        a_new = menu.addAction(self._icons['new_chat'], trans('action.ctx.new'))
         a_new.triggered.connect(functools.partial(self.action_group_new_in_group, group_ids))
 
-        a_rename = menu.addAction(self._icons['edit'], trans('action.rename'))
-        a_rename.triggered.connect(functools.partial(self.action_group_rename, group_ids))
+        a_rename = menu.addAction(self._icons['edit'], trans('action.edit'))
+        a_rename.triggered.connect(functools.partial(self.action_group_edit, group_ids))
 
         a_delete = menu.addAction(self._icons['delete'], trans('action.group.delete.only'))
         a_delete.triggered.connect(functools.partial(self.action_group_delete_only, group_ids))
@@ -980,6 +1677,22 @@ class ContextList(BaseList):
         a_copy.triggered.connect(functools.partial(self.action_copy_id, group_ids))
 
         return menu
+
+    @staticmethod
+    def _format_project_index_time(timestamp: int) -> str:
+        """Format project index timestamp for the project context menu."""
+        dt = datetime.datetime.fromtimestamp(timestamp)
+        today = datetime.datetime.now().date()
+        days_ago = (today - dt.date()).days
+        time_str = dt.strftime("%H:%M")
+
+        if days_ago == 0:
+            return f"{trans('dt.today')}, {time_str}"
+        if days_ago == 1:
+            return f"{trans('dt.yesterday')}, {time_str}"
+        if days_ago == 2:
+            return f"{trans('dt.day_before_yesterday')}, {time_str}"
+        return dt.strftime("%Y-%m-%d %H:%M")
 
     def show_context_menu(self, pos: QPoint):
         """
@@ -1043,10 +1756,31 @@ class ContextList(BaseList):
 
             if hasattr(item, 'isFolder') and item.isFolder:
                 menu = QMenu(self)
-                a_new = menu.addAction(self._icons['add'], trans('action.ctx.new'))
+                a_new = menu.addAction(self._icons['new_chat'], trans('action.ctx.new'))
                 a_new.triggered.connect(functools.partial(self.window.controller.ctx.new_in_group, force=False, group_id=id_value))
-                a_rename = menu.addAction(self._icons['edit'], trans('action.rename'))
-                a_rename.triggered.connect(functools.partial(self.window.controller.ctx.rename_group, id_value))
+                a_rename = menu.addAction(self._icons['edit'], trans('action.edit'))
+                a_rename.triggered.connect(functools.partial(self.window.controller.ctx.edit_group, id_value))
+                a_duplicate = menu.addAction(self._icons['copy'], trans('action.group.duplicate'))
+                a_duplicate.triggered.connect(functools.partial(self.window.controller.ctx.duplicate_group, id_value))
+
+                menu.addSeparator()
+                state = self.window.core.idx.project.get(id_value)
+                last_update = int(state.get('last_update', 0)) if state else 0
+                if last_update > 0:
+                    last_str = self._format_project_index_time(last_update)
+                else:
+                    last_str = trans('settings.llama.extra.db.never')
+                update_label = trans('idx.project.update') + " (" + trans('idx.last') + ": " + last_str + ")"
+                a_idx_update = menu.addAction(self._icons['db'], update_label)
+                a_idx_update.triggered.connect(
+                    functools.partial(self.window.controller.ctx.update_project_index, id_value)
+                )
+                a_idx_truncate = menu.addAction(self._icons['delete'], trans('idx.project.truncate'))
+                a_idx_truncate.triggered.connect(
+                    functools.partial(self.window.controller.ctx.truncate_project_index, id_value)
+                )
+
+                menu.addSeparator()
                 a_delete = menu.addAction(self._icons['delete'], trans('action.group.delete.only'))
                 a_delete.triggered.connect(functools.partial(self.window.controller.ctx.delete_group, id_value))
                 a_delete_all = menu.addAction(self._icons['delete'], trans('action.group.delete.all'))
@@ -1099,22 +1833,51 @@ class ContextList(BaseList):
                 idx_menu = QMenu(trans('action.idx'), self)
                 idxs = self.window.core.config.get('llama.idx.list')
                 store = self.window.core.idx.get_current_store()
+                project_group_id = self._get_common_project_group_id([ctx])
+                project_idx = None
+                store_indexes = self._get_ctx_store_indexes(ctx, store)
+                has_index_target = False
+
+                if project_group_id is not None:
+                    project_idx = self.window.core.idx.project.get_idx_id(project_group_id)
+                    if project_idx not in store_indexes:
+                        action = idx_menu.addAction(
+                            self._icons['db'],
+                            "IDX: " + trans('idx.current_project'),
+                        )
+                        action.triggered.connect(
+                            functools.partial(self.action_idx, ctx_id, project_idx)
+                        )
+                        has_index_target = True
+
                 if idxs:
                     for idx_dict in idxs:
-                        index_id = idx_dict['id']
+                        index_id = str(idx_dict['id'])
+                        if index_id in store_indexes:
+                            continue
                         name = idx_dict['name'] + " (" + idx_dict['id'] + ")"
                         action = idx_menu.addAction(self._icons['db'], "IDX: " + name)
                         action.triggered.connect(functools.partial(self.action_idx, ctx_id, index_id))
+                        has_index_target = True
 
-                    if ctx.indexed is not None and ctx.indexed > 0:
-                        if store in ctx.indexes:
-                            store_indexes = ctx.indexes[store]
-                            idx_menu.addSeparator()
-                            for store_index in store_indexes:
-                                action = idx_menu.addAction(self._icons['delete'], trans("action.idx.remove") + ": " + store_index)
-                                action.triggered.connect(
-                                    functools.partial(self.action_idx_remove, store_index, ctx_id)
-                                )
+                if store_indexes:
+                    if has_index_target:
+                        idx_menu.addSeparator()
+                    for store_index in sorted(store_indexes):
+                        display_idx = (
+                            trans('idx.current_project')
+                            if project_idx is not None and store_index == project_idx
+                            else store_index
+                        )
+                        action = idx_menu.addAction(
+                            self._icons['delete'],
+                            trans("action.idx.remove") + ": " + display_idx,
+                        )
+                        action.triggered.connect(
+                            functools.partial(self.action_idx_remove, store_index, ctx_id)
+                        )
+
+                if has_index_target or store_indexes:
                     menu.addMenu(idx_menu)
 
                 group_menu = QMenu(trans('action.move_to'), self)
@@ -1344,12 +2107,14 @@ class ContextList(BaseList):
         self.restore_after_ctx_menu = False
         self.window.controller.ctx.new_in_group(force=False, group_id=group_id_or_ids)
 
-    def action_group_rename(self, group_id_or_ids):
-        """
-        Rename group(s).
-        """
+    def action_group_edit(self, group_id_or_ids):
+        """Edit project(s)."""
         self.restore_after_ctx_menu = False
-        self.window.controller.ctx.rename_group(group_id_or_ids)
+        self.window.controller.ctx.edit_group(group_id_or_ids)
+
+    def action_group_rename(self, group_id_or_ids):
+        """Backward-compatible wrapper for project editing."""
+        self.action_group_edit(group_id_or_ids)
 
     def action_group_delete_only(self, group_id_or_ids):
         """
@@ -1375,22 +2140,56 @@ class ContextList(BaseList):
 
     def selectionCommand(self, index, event=None):
         """
-        Selection command
+        Selection command.
+
+        A plain click on a project is navigation-only and does not select the
+        project row. Ctrl/Shift selection of projects is allowed. Additive
+        selection is kept homogeneous, so project rows and context rows are not
+        mixed in one persistent selection.
+
         :param index: Index
         :param event: Event
         """
-        # Prevent mixing selection types (groups vs items)
+        command = super().selectionCommand(index, event)
+
         try:
             if index and index.isValid():
                 target_is_group = self._is_group_index(index)
+
+                if target_is_group:
+                    modifiers = Qt.NoModifier
+                    try:
+                        if event is not None and hasattr(event, 'modifiers'):
+                            modifiers = event.modifiers()
+                        else:
+                            modifiers = QtWidgets.QApplication.keyboardModifiers()
+                    except Exception:
+                        modifiers = Qt.NoModifier
+
+                    # Normal project click: never create a persistent selection.
+                    if not (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)):
+                        return QItemSelectionModel.NoUpdate
+
                 types = self._selection_types()
-                if types == {'group'} and not target_is_group:
-                    return QItemSelectionModel.NoUpdate
-                if types == {'item'} and target_is_group:
+                type_mismatch = (
+                    (types == {'group'} and not target_is_group)
+                    or (types == {'item'} and target_is_group)
+                )
+
+                if type_mismatch:
+                    # Replacement selection can safely switch between project
+                    # and context rows without creating a mixed selection.
+                    if command & QItemSelectionModel.Clear:
+                        return command
+
+                    # Additive/toggle selection of the opposite row type is
+                    # blocked; mousePressEvent normalizes Ctrl/Shift selection
+                    # to the clicked target type first.
                     return QItemSelectionModel.NoUpdate
         except Exception:
             pass
-        return super().selectionCommand(index, event)
+
+        return command
 
     # =========================
     # Drag & Drop implementation
@@ -1596,15 +2395,19 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
     - Attachment icon on the right side (centered vertically),
     - Pinned indicator (pin.svg icon) in the top-right corner (overlays if needed),
     - Label color as a full-height vertical bar on the left for labeled items,
-    - Group enclosure indicator for expanded groups:
-        - thin vertical bar (default 2 px) on the left side of child rows area,
-        - thin horizontal bar (default 2 px) at the bottom of the last child row.
     """
-    def __init__(self, parent=None, attachment_icon: QIcon = None, pin_icon: QIcon = None):
+    def __init__(
+            self,
+            parent=None,
+            attachment_icon: QIcon = None,
+            pin_icon: QIcon = None,
+            add_icon: QIcon = None,
+    ):
         super().__init__(parent)
         self._attachment_icon = attachment_icon or QIcon(":/icons/attachment.svg")
         # Use provided pin icon (transparent background) as pinned indicator
         self._pin_icon = pin_icon or QIcon(":/icons/pin.svg")
+        self._add_icon = add_icon or QIcon(":/icons/new_chat.svg")
 
         # Predefined label colors (status -> QColor)
         self._status_colors = {
@@ -1623,8 +2426,11 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
         self._pin_diameter = 4
         self._pin_margin = 3
         self._attach_spacing = 4
-        self._label_bar_width = 4
+        self._label_bar_width = 6
         self._label_v_margin = 3
+        # Keep the color label slightly left of the text, matching the native
+        # delegate spacing used before explicit context-row text painting.
+        self._label_bar_x_offset = -5
 
         # Manual child indent to keep hierarchy visible when view indentation is 0
         self._child_indent = 15
@@ -1645,9 +2451,62 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
         self._group_count_color = QColor(128, 128, 128)
         # Extra padding so wide values like "999" are never cramped
         self._group_count_extra_pad = 4
+        self._group_add_icon_size = 14
 
         # Try to load customization from application config (safe if missing)
         self._init_group_indicator_from_config()
+
+    def group_add_rect(self, row_rect: QtCore.QRect) -> QtCore.QRect:
+        """Return the add.svg paint/hit-test rectangle for a project row."""
+        if not row_rect.isValid() or row_rect.height() <= 0:
+            return QtCore.QRect()
+        size = min(self._group_add_icon_size, max(8, row_rect.height() - 4))
+        icon_right = row_rect.right() - self._group_count_right_margin
+        icon_x = icon_right - size
+        icon_y = row_rect.top() + (row_rect.height() - size) // 2
+        return QtCore.QRect(icon_x, icon_y, size, size)
+
+    def section_add_rect(self, row_rect: QtCore.QRect) -> QtCore.QRect:
+        """Return the add.svg paint/hit-test rectangle for a section header."""
+        return self.group_add_rect(row_rect)
+
+    def section_label_rect(self, index: QtCore.QModelIndex, row_rect: QtCore.QRect) -> QtCore.QRect:
+        """Return the actual left-title hit area for a collapsible section."""
+        if not index.isValid() or not row_rect.isValid():
+            return QtCore.QRect()
+        try:
+            model = index.model()
+            item = model.itemFromIndex(index) if hasattr(model, 'itemFromIndex') else None
+            if not isinstance(item, SectionItem) or not getattr(item, 'section_key', None):
+                return QtCore.QRect()
+
+            opt = QtWidgets.QStyleOptionViewItem()
+            opt.rect = QtCore.QRect(row_rect)
+            self.initStyleOption(opt, index)
+            view = self.parent()
+            if view is not None:
+                opt.widget = view
+            opt.text = item.title
+            opt.displayAlignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+            style = view.style() if view is not None else QtWidgets.QApplication.style()
+            text_rect = style.subElementRect(
+                QtWidgets.QStyle.SE_ItemViewItemText,
+                opt,
+                opt.widget,
+            )
+            if not text_rect.isValid() or text_rect.width() <= 0:
+                text_rect = row_rect.adjusted(2, 0, -2, 0)
+
+            fm = QtGui.QFontMetrics(opt.font)
+            width = min(text_rect.width(), max(1, fm.horizontalAdvance(item.title)))
+            return QtCore.QRect(
+                text_rect.left(),
+                row_rect.top(),
+                width,
+                row_rect.height(),
+            )
+        except Exception:
+            return QtCore.QRect()
 
     def _init_group_indicator_from_config(self):
         """
@@ -1729,7 +2588,271 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
                     return None
         return None
 
+    @staticmethod
+    def _resolved_view_color(view, property_name, palette, fallback_role):
+        """Resolve a theme color from a QSS-backed Qt property.
+
+        The delegate never embeds theme-specific RGB values. If a stylesheet
+        does not provide the property, use the active palette as a safe fallback.
+        """
+        try:
+            color = getattr(view, property_name)
+            if isinstance(color, QColor) and color.isValid():
+                return QColor(color)
+        except Exception:
+            pass
+        return QColor(palette.color(fallback_role))
+
+    def _context_text_color(self, option, item):
+        """Return the QSS-defined text color for ordinary context-list rows."""
+        if isinstance(item, (SectionItem, ShowMoreItem)):
+            return None
+        if not (option.state & QtWidgets.QStyle.State_Enabled):
+            return None
+
+        view = self.parent()
+        palette = option.palette
+        selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+        has_item_focus = bool(option.state & QtWidgets.QStyle.State_HasFocus)
+        try:
+            view_has_focus = bool(view is not None and (view.hasFocus() or view.viewport().hasFocus()))
+        except Exception:
+            view_has_focus = False
+
+        # State priority is intentionally theme-agnostic. QSS decides what each
+        # semantic state looks like in Dark, Light, or any future built-in theme.
+        if selected and has_item_focus and view_has_focus:
+            return self._resolved_view_color(
+                view,
+                "focusedSelectedTextColor",
+                palette,
+                QtGui.QPalette.HighlightedText,
+            )
+        if selected:
+            return self._resolved_view_color(
+                view,
+                "activeTextColor",
+                palette,
+                QtGui.QPalette.Text,
+            )
+        if option.state & QtWidgets.QStyle.State_MouseOver:
+            return self._resolved_view_color(
+                view,
+                "hoverTextColor",
+                palette,
+                QtGui.QPalette.Text,
+            )
+        return self._resolved_view_color(
+            view,
+            "normalTextColor",
+            palette,
+            QtGui.QPalette.Text,
+        )
+
+    def _paint_native_context_item(self, painter, option, index):
+        """Paint a regular context row with an explicit text color.
+
+        Qt's stylesheet engine can overwrite QPalette text roles while drawing
+        a QTreeView item. Paint the native item surface/decoration
+        first with an empty display string, then paint only its text ourselves.
+        Hover and selection backgrounds remain fully native.
+        """
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        QtWidgets.QStyledItemDelegate.initStyleOption(self, opt, index)
+
+        item = None
+        try:
+            model = index.model()
+            item = model.itemFromIndex(index) if hasattr(model, "itemFromIndex") else None
+        except Exception:
+            item = None
+
+        color = self._context_text_color(opt, item)
+        if color is None:
+            super(ImportantItemDelegate, self).paint(painter, option, index)
+            return
+
+        text = opt.text
+        style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+        text_rect = style.subElementRect(
+            QtWidgets.QStyle.SE_ItemViewItemText,
+            opt,
+            opt.widget,
+        )
+
+        # Let the current QStyle/QSS paint the row background, hover/selection
+        # surface and decoration, but not the display text.
+        opt.text = ""
+        style.drawControl(
+            QtWidgets.QStyle.CE_ItemViewItem,
+            opt,
+            painter,
+            opt.widget,
+        )
+
+        if not text or not text_rect.isValid():
+            return
+
+        painter.save()
+        try:
+            painter.setFont(opt.font)
+            painter.setPen(color)
+            fm = QtGui.QFontMetrics(opt.font)
+            rendered = fm.elidedText(
+                text,
+                opt.textElideMode,
+                max(0, text_rect.width()),
+            )
+            alignment = opt.displayAlignment or (QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            painter.drawText(text_rect, int(alignment), rendered)
+        finally:
+            painter.restore()
+
     def paint(self, painter, option, index):
+        # Section rows may optionally contain a fixed left title plus an
+        # independently elidable, right-aligned secondary label.
+        item = None
+        try:
+            model = index.model()
+            item = model.itemFromIndex(index) if hasattr(model, "itemFromIndex") else None
+        except Exception:
+            item = None
+
+        # Do not synthesize State_MouseOver here. Native Qt hover is deliberately
+        # preserved so only the real row under the cursor receives row-hover
+        # background. Whole-list text brightening is painted explicitly for
+        # ordinary rows by _paint_native_context_item().
+        option = QtWidgets.QStyleOptionViewItem(option)
+        if isinstance(item, SectionItem) and not isinstance(item, ShowMoreItem):
+            option.state &= ~QtWidgets.QStyle.State_MouseOver
+
+        # Project-list limit controls are clickable presentation rows but deliberately use
+        # the exact disabled/bold typography of context-list headers. Paint it
+        # through the native item-view style and center the text across the row.
+        if isinstance(item, ShowMoreItem):
+            opt = QtWidgets.QStyleOptionViewItem(option)
+            self.initStyleOption(opt, index)
+            view = self.parent()
+            hovered = bool(opt.state & QtWidgets.QStyle.State_MouseOver)
+            try:
+                cursor_index = view._index_under_cursor() if view is not None else QtCore.QModelIndex()
+                hovered = bool(
+                    cursor_index.isValid()
+                    and view._is_show_more_index(cursor_index)
+                    and view._same_index(QPersistentModelIndex(cursor_index), index)
+                )
+            except Exception:
+                pass
+            title = item.title
+            opt.displayAlignment = item.textAlignment()
+            style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+
+            # Use the same text geometry in both states so hover only changes color.
+            opt.text = title
+            text_rect = style.subElementRect(QtWidgets.QStyle.SE_ItemViewItemText, opt, opt.widget)
+            if item.scope == ShowMoreItem.NEW_PROJECT:
+                text_rect.adjust(4, 0, 0, 0)
+            opt.text = ""
+            style.drawControl(
+                QtWidgets.QStyle.CE_ItemViewItem,
+                opt,
+                painter,
+                opt.widget,
+            )
+            color = self._resolved_view_color(
+                view,
+                "showMoreHoverTextColor",
+                opt.palette,
+                QtGui.QPalette.Text,
+            ) if hovered else opt.palette.color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+            painter.save()
+            try:
+                font = QtGui.QFont(opt.font)
+                if item.scope == ShowMoreItem.NEW_PROJECT and hovered:
+                    font.setUnderline(True)
+                painter.setFont(font)
+                painter.setPen(color)
+                painter.drawText(text_rect, int(opt.displayAlignment), title)
+            finally:
+                painter.restore()
+            return
+
+        # A collapsed top-level section always shows its full item count on
+        # the right. This takes precedence over hover actions (add.svg) and
+        # over Recent's inline date label.
+        if isinstance(item, SectionItem) and getattr(item, 'section_key', None):
+            view = self.parent()
+            is_collapsed = False
+            try:
+                is_collapsed = bool(
+                    view is not None
+                    and view.is_section_collapsed(index)
+                )
+            except Exception:
+                is_collapsed = False
+
+            if is_collapsed and getattr(item, 'section_count', None) is not None:
+                self._paint_split_section(
+                    painter,
+                    option,
+                    index,
+                    item,
+                    right_text=str(item.section_count),
+                )
+                return
+
+        if isinstance(item, SectionItem) and item.action:
+            view = self.parent()
+            is_hovered = False
+            try:
+                is_hovered = bool(
+                    view is not None
+                    and view.is_section_action_hovered(index)
+                )
+            except Exception:
+                is_hovered = False
+
+            # Actionable headers without secondary text (e.g. Projects) must
+            # use the *same* paint path both before and during hover. Switching
+            # from Qt's default delegate painting to our custom action painter
+            # changes the text baseline by a pixel with some styles, which made
+            # the header visibly jump when add.svg appeared.
+            if not item.right_text:
+                self._paint_action_section(
+                    painter,
+                    option,
+                    index,
+                    item,
+                    show_icon=is_hovered,
+                )
+                return
+
+            if is_hovered:
+                self._paint_action_section(
+                    painter,
+                    option,
+                    index,
+                    item,
+                    show_icon=True,
+                )
+                return
+
+        if isinstance(item, SectionItem) and item.right_text:
+            self._paint_split_section(painter, option, index, item)
+            return
+
+        # Plain top-level section headers (currently Pinned) must use the same
+        # painter as their collapsed/count state. Otherwise Qt's default item
+        # painter and _paint_split_section() can produce a one-pixel baseline
+        # difference when the section is collapsed and the counter appears.
+        if isinstance(item, SectionItem) and getattr(item, 'section_key', None):
+            self._paint_split_section(painter, option, index, item)
+            return
+
+        # Give every regular row 2 px more room for the left color label.
+        # Section headers return above and intentionally keep their original geometry.
+        option.rect.adjust(2, 0, 0, 0)
+
         # Shift children by +15 px to keep them visually nested.
         is_child = index.parent().isValid()
         if is_child:
@@ -1750,61 +2873,94 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
             count = int(data.get("count", 0)) if isinstance(data, dict) and "count" in data else 0
             has_attachment = bool(data.get("is_attachment", False))
 
+            view = self.parent()
+            is_hovered = False
+            try:
+                is_hovered = bool(view is not None and view.is_group_hovered(index))
+            except Exception:
+                is_hovered = False
+
             fm = option.fontMetrics
             icon_size = option.decorationSize or QtCore.QSize(16, 16)
 
             count_text = str(count) if count > 0 else ""
             has_count = bool(count_text)
             count_w = fm.horizontalAdvance(count_text) if has_count else 0
+            show_action = is_hovered or has_count
+            if is_hovered:
+                action_w = self.group_add_rect(option.rect).width()
+            elif has_count:
+                action_w = count_w + self._group_count_extra_pad
+            else:
+                action_w = 0
 
             # Compute reserved right-side space:
-            # right margin + [counter width + pad] + [icon + spacing] + left gap
+            # right margin + [counter/add action] + [attachment + spacing] + left gap
             reserve = self._group_count_right_margin
-            if has_count:
-                reserve += count_w + self._group_count_extra_pad
+            if show_action:
+                reserve += action_w
             if has_attachment:
                 reserve += icon_size.width()
-                if has_count:
+                if show_action:
                     reserve += self._attach_spacing
-            if has_count or has_attachment:
+            if show_action or has_attachment:
                 reserve += self._group_count_left_gap
 
             opt = QtWidgets.QStyleOptionViewItem(option)
+
+            # Plain clicks on projects are navigation-only, so suppress any
+            # transient current-row highlight Qt may paint. Explicit Ctrl/Shift
+            # project selections remain visible like ordinary selected rows.
+            try:
+                is_selected = bool(
+                    view is not None
+                    and view.selectionModel() is not None
+                    and view.selectionModel().isSelected(index)
+                )
+                if not is_selected:
+                    opt.state &= ~QtWidgets.QStyle.State_Selected
+                    opt.state &= ~QtWidgets.QStyle.State_HasFocus
+            except Exception:
+                pass
+
             if reserve > 0:
                 opt.rect = opt.rect.adjusted(0, 0, -int(reserve), 0)
 
             # Paint base content
             painter.save()
             painter.translate(-2, 0)
-            super(ImportantItemDelegate, self).paint(painter, opt, index)
+            self._paint_native_context_item(painter, opt, index)
             painter.restore()
 
             # Draw right-side widgets with the required order:
-            # attachment icon first (to the left), counter always flush to the far right.
+            # attachment first (to the left), counter/add action at the far right.
             painter.save()
             right_edge = option.rect.right()
             top = option.rect.top()
             height = option.rect.height()
 
-            count_rect = None
-            if has_count:
+            action_rect = None
+            if is_hovered:
+                action_rect = self.group_add_rect(option.rect)
+                self._add_icon.paint(painter, action_rect, QtCore.Qt.AlignCenter)
+            elif has_count:
                 count_right = right_edge - self._group_count_right_margin
                 # Constrain counter area to avoid conflicting with left content/gap
                 min_left = opt.rect.right() + self._group_count_left_gap
                 count_width = count_w + self._group_count_extra_pad
                 count_left = max(min_left, count_right - count_width)
-                count_rect = QtCore.QRect(
+                action_rect = QtCore.QRect(
                     count_left,
                     top,
                     max(0, count_right - count_left),
                     height
                 )
                 painter.setPen(self._group_count_color)
-                painter.drawText(count_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, count_text)
+                painter.drawText(action_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, count_text)
 
             if has_attachment:
-                if count_rect is not None:
-                    icon_right = count_rect.left() - self._attach_spacing
+                if action_rect is not None:
+                    icon_right = action_rect.left() - self._attach_spacing
                 else:
                     icon_right = right_edge - self._group_count_right_margin
                 icon_x = icon_right - icon_size.width()
@@ -1815,29 +2971,7 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
             painter.restore()
         else:
             # Default painting for non-group rows
-            super(ImportantItemDelegate, self).paint(painter, option, index)
-
-        # Group enclosure indicator (left bar) for child rows
-        if self._group_indicator_enabled and not is_group and is_child and self._group_indicator_width > 0:
-            try:
-                painter.save()
-                # Use solid fill for crisp 2px bars (no anti-alias blur)
-                painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-                color = self._group_indicator_color
-                painter.setPen(QtCore.Qt.NoPen)
-                painter.setBrush(color)
-
-                # Compute vertical bar geometry:
-                # Place the bar to the LEFT of the child content area, leaving a small gap.
-                child_left = option.rect.x()
-                bar_w = self._group_indicator_width
-                vbar_left = max(0, child_left - (self._group_indicator_gap + bar_w))
-                vbar_rect = QtCore.QRect(vbar_left, option.rect.y(), bar_w, option.rect.height())
-                painter.drawRect(vbar_rect)
-
-                painter.restore()
-            except Exception:
-                pass
+            self._paint_native_context_item(painter, option, index)
 
         # Custom data painting for non-group items only (labels, pinned, attachments).
         if not is_group:
@@ -1879,7 +3013,7 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
                     bar_y = option.rect.y() + self._label_v_margin
                     bar_h = max(1, option.rect.height() - 2 * self._label_v_margin)
                     bar_rect = QtCore.QRect(
-                        option.rect.x(),
+                        option.rect.x() + self._label_bar_x_offset,
                         bar_y,
                         self._label_bar_width,
                         bar_h,
@@ -1889,6 +3023,149 @@ class ImportantItemDelegate(QtWidgets.QStyledItemDelegate):
                     painter.drawRect(bar_rect)
 
                 painter.restore()
+
+    def _paint_action_section(
+            self,
+            painter,
+            option,
+            index,
+            item,
+            show_icon: bool = True,
+    ):
+        """
+        Paint an actionable section header with stable title geometry.
+
+        For headers without secondary text (e.g. Projects) this painter is used
+        in both normal and hover states so the title baseline cannot change when
+        add.svg appears. For headers with right-side text (e.g. Recent), hover
+        replaces that text with add.svg.
+        """
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        # Keep the section title in exactly the same visual position as in
+        # the non-hovered state. Some Qt styles/stylesheets alter item text
+        # padding for State_MouseOver, which otherwise makes e.g. "Projects"
+        # jump by a pixel when the add icon appears. The icon itself is
+        # painted separately, so the native hover state is not needed here.
+        opt.state &= ~QtWidgets.QStyle.State_MouseOver
+
+        action_rect = self.section_add_rect(option.rect)
+        if not action_rect.isValid():
+            super(ImportantItemDelegate, self).paint(painter, opt, index)
+            return
+
+        reserve = max(
+            0,
+            option.rect.right() - action_rect.left() + 1 + self._group_count_left_gap,
+        )
+        if reserve > 0:
+            opt.rect = opt.rect.adjusted(0, 0, -reserve, 0)
+
+        opt.text = item.title
+        opt.displayAlignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+
+        style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+        style.drawControl(
+            QtWidgets.QStyle.CE_ItemViewItem,
+            opt,
+            painter,
+            opt.widget,
+        )
+        if show_icon:
+            self._add_icon.paint(painter, action_rect, QtCore.Qt.AlignCenter)
+
+    def _paint_split_section(self, painter, option, index, item, right_text=None):
+        """
+        Paint a section row with a full left title and a right label.
+
+        Both labels are rendered through the native item-view style instead
+        of being drawn manually. This keeps the font, disabled text color,
+        vertical alignment and padding exactly the same as ordinary date
+        SectionItem rows. The left section title always has priority; the
+        right label is constrained to the remaining space and is elided by
+        Qt when necessary.
+        """
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        # Keep title/counter geometry identical while the pointer moves over
+        # a collapsed section. The hover itself has no action in this state.
+        opt.state &= ~QtWidgets.QStyle.State_MouseOver
+
+        style = opt.widget.style() if opt.widget is not None else QtWidgets.QApplication.style()
+
+        # First draw the section title exactly as a regular SectionItem would
+        # be drawn, changing only its alignment from the date-row default
+        # (right) to the section-header alignment (left).
+        left_opt = QtWidgets.QStyleOptionViewItem(opt)
+        left_opt.text = item.title
+        left_opt.displayAlignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+        style.drawControl(
+            QtWidgets.QStyle.CE_ItemViewItem,
+            left_opt,
+            painter,
+            left_opt.widget,
+        )
+
+        # Determine the actual text area used by the current Qt style. This
+        # is important because stylesheet/platform margins can differ.
+        text_rect = style.subElementRect(
+            QtWidgets.QStyle.SE_ItemViewItemText,
+            left_opt,
+            left_opt.widget,
+        )
+        if not text_rect.isValid() or text_rect.width() <= 0:
+            text_rect = option.rect.adjusted(2, 0, -2, 0)
+
+        fm = QtGui.QFontMetrics(left_opt.font)
+        left_width = fm.horizontalAdvance(item.title)
+        gap = 12
+
+        # Reserve the complete section title. The secondary/date label gets
+        # only the remaining width and therefore elides first on narrow lists.
+        right_content_left = text_rect.left() + left_width + gap
+        if right_content_left >= text_rect.right():
+            return
+
+        # Plain top-level headers such as Pinned intentionally use this same
+        # paint path even when they have no right-side label. Keeping the left
+        # title on one painter path prevents its baseline from changing when a
+        # collapsed-state counter later appears.
+        resolved_right_text = item.right_text if right_text is None else str(right_text)
+        if resolved_right_text is None or resolved_right_text == "":
+            return
+
+        # Use a second native item-style pass for the right label. Its outer
+        # rect ends at the original row edge, so its right padding is exactly
+        # the same as for a standalone right-aligned date SectionItem.
+        right_opt = QtWidgets.QStyleOptionViewItem(opt)
+        right_opt.text = resolved_right_text
+        right_opt.displayAlignment = QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        right_opt.textElideMode = QtCore.Qt.ElideRight
+
+        # Account for the style's own left content inset when choosing the
+        # sub-rect, while never allowing it to overlap the left title.
+        style_left_inset = max(0, text_rect.left() - option.rect.left())
+        right_outer_left = max(
+            option.rect.left(),
+            right_content_left - style_left_inset,
+        )
+        right_opt.rect = QtCore.QRect(
+            right_outer_left,
+            option.rect.top(),
+            max(0, option.rect.right() - right_outer_left + 1),
+            option.rect.height(),
+        )
+        if right_opt.rect.width() <= 0:
+            return
+
+        style.drawControl(
+            QtWidgets.QStyle.CE_ItemViewItem,
+            right_opt,
+            painter,
+            right_opt.widget,
+        )
 
     def get_color_for_status(self, status: int) -> QColor:
         """
@@ -1921,13 +3198,52 @@ class Item(QStandardItem):
 
 
 class SectionItem(QStandardItem):
-    def __init__(self, title, group: bool = False):
+    def __init__(
+            self,
+            title,
+            group: bool = False,
+            right_text: str | None = None,
+            action: str | None = None,
+            section_key: str | None = None,
+            section_count: int | None = None,
+    ):
         super().__init__(title)
         self.title = title
         self.group = group
+        self.right_text = right_text
+        self.action = action
+        self.section_key = section_key
+        self.section_count = section_count
         self.setSelectable(False)
         self.setEnabled(False)
         self.setTextAlignment(QtCore.Qt.AlignRight)
         font = self.font()
         font.setBold(True)
         self.setFont(font)
+
+
+class ShowMoreItem(SectionItem):
+    """Centered expand/collapse control for capped context-list sections."""
+
+    PINNED = 'pinned'
+    NEW_PROJECT = 'new_project'
+    PROJECTS = 'projects'
+    PROJECT_CONTEXTS = 'project_contexts'
+
+    def __init__(
+            self,
+            title: str,
+            scope: str,
+            group_id: int | None = None,
+            remaining_count: int = 0,
+            collapse: bool = False,
+    ):
+        super().__init__(title, group=group_id is not None)
+        self.title = title
+        self.scope = scope
+        self.group_id = group_id
+        self.remaining_count = int(remaining_count or 0)
+        self.collapse = bool(collapse)
+        self.setTextAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+            if scope == self.NEW_PROJECT else QtCore.Qt.AlignCenter)

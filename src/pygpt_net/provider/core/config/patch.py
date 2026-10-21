@@ -6,16 +6,10 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.02.06 01:00:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
 
-import copy
-import os
-
 from packaging.version import parse as parse_version, Version
-
-# old patches moved here
-from .patches.patch_before_2_6_42 import Patch as PatchBefore2_6_42
 
 
 class Patch:
@@ -30,9 +24,6 @@ class Patch:
         :return: True if migrated
         """
         data = self.window.core.config.all()
-        cfg_get_base = self.window.core.config.get_base
-        remove_plugin_config = self.window.core.config.remove_plugin_config
-        patch_css = self.window.core.updater.patch_css
         current = "0.0.0"
         updated = False
         is_old = False
@@ -42,256 +33,158 @@ class Patch:
             current = data['__meta__']['version']
         old = parse_version(current)
 
+        # Remove obsolete global sampling controls even when the stored config
+        # already has the current version. They are no longer exposed or sent
+        # by PyGPT and should not linger in user config files.
+        for key in (
+            "presence_penalty",
+            "frequency_penalty",
+            "temperature",
+            "top_p",
+        ):
+            if key in data:
+                del data[key]
+                updated = True
+
         # check if config file is older than current app version
         if old < version:
 
             is_old = True
 
             # --------------------------------------------
-            # previous patches for versions before 2.6.42
-            if old < parse_version("2.6.42"):
-                patcher = PatchBefore2_6_42(self.window)
+            # previous patches for versions before 2.8.32
+            if old < parse_version("2.8.32"):
+                # old patches moved here
+                from .patches.patch_before_2_8_32 import Patch as PatchBefore2_8_32
+                patcher = PatchBefore2_8_32(self.window)
                 data, updated, _ = patcher.execute(version)
             # --------------------------------------------
-
-            # < 2.6.43
-            if old < parse_version("2.6.43"):
-                print("Migrating config from < 2.6.43...")
-                # li div margin
-                patch_css('web-chatgpt.css', True)
-                patch_css('web-chatgpt_wide.css', True)
-                patch_css('web-blocks.css', True)
-                updated = True
-
-            # < 2.6.44
-            if old < parse_version("2.6.44"):
-                print("Migrating config from < 2.6.44...")
-                if "render.code_syntax.stream_n_line" not in data:
-                    data["render.code_syntax.stream_n_line"] = 25
-                if "render.code_syntax.stream_n_chars" not in data:
-                    data["render.code_syntax.stream_n_chars"] = 5000
-                if "render.code_syntax.disabled" not in data:
-                    data["render.code_syntax.disabled"] = False
-                if "render.msg.user.collapse.px" not in data:
-                    data["render.msg.user.collapse.px"] = 1500
-                updated = True
-
-            # < 2.6.46
-            if old < parse_version("2.6.46"):
-                print("Migrating config from < 2.6.46...")
-                # output stream margin-top: 0
-                patch_css('web-chatgpt.css', True)
-                patch_css('web-chatgpt_wide.css', True)
-                patch_css('web-blocks.css', True)
-                patch_css('style.dark.css', True)
-                patch_css('web-blocks.light.css', True)
-                patch_css('web-chatgpt.light.css', True)
-                patch_css('web-chatgpt_wide.light.css', True)
-                updated = True
-
-            # < 2.6.48
-            if old < parse_version("2.6.48"):
-                print("Migrating config from < 2.6.48...")
-                # reformat
-                patch_css('web-chatgpt.css', True)
-                patch_css('web-chatgpt_wide.css', True)
-                patch_css('web-blocks.css', True)
-                updated = True
-
-            # < 2.6.51
-            if old < parse_version("2.6.51"):
-                print("Migrating config from < 2.6.51...")
-                # calendar css
-                patch_css('style.dark.css', True)
-                updated = True
-
-            # < 2.6.53
-            if old < parse_version("2.6.53"):
-                print("Migrating config from < 2.6.53...")
-                if "remote_tools.global.web_search" not in data:
-                    data["remote_tools.global.web_search"] = True
-                updated = True
-
-            # < 2.6.56
-            if old < parse_version("2.6.56"):
-                print("Migrating config from < 2.6.56...")
-                # copy btn header
-                patch_css('web-chatgpt.css', True)
-                patch_css('web-chatgpt_wide.css', True)
-                patch_css('web-blocks.css', True)
-                patch_css('web-blocks.light.css', True)
-                patch_css('web-chatgpt.light.css', True)
-                patch_css('web-chatgpt_wide.light.css', True)
-                patch_css('web-blocks.dark.css', True)
-                patch_css('web-chatgpt.dark.css', True)
-                patch_css('web-chatgpt_wide.dark.css', True)
-                patch_css('web-blocks.darkest.css', True)
-                patch_css('web-chatgpt.darkest.css', True)
-                patch_css('web-chatgpt_wide.darkest.css', True)
-                updated = True
-
-            # < 2.6.57
-            if old < parse_version("2.6.57"):
-                print("Migrating config from < 2.6.57...")
-                remove_plugin_config("cmd_web", "max_open_urls")
-                remove_plugin_config("cmd_web", "cmd.web_url_open")
-                remove_plugin_config("cmd_web", "cmd.web_url_raw")
-                remove_plugin_config("cmd_web", "cmd.web_extract_links")
-                remove_plugin_config("cmd_web", "cmd.web_extract_images")
-                if "api_proxy.enabled" not in data:
-                    data["api_proxy.enabled"] = False
-                if "api_proxy" in data and data["api_proxy"]:
-                    data["api_proxy.enabled"] = True
-                updated = True
-
-            # < 2.6.58
-            if old < parse_version("2.6.58"):
-                print("Migrating config from < 2.6.58...")
-                if "ctx.urls.internal" not in data:
-                    data["ctx.urls.internal"] = False
-                updated = True
-
-            # < 2.6.61
-            if old < parse_version("2.6.61"):
-                print("Migrating config from < 2.6.61...")
-                if "presets.drag_and_drop.enabled" not in data:
-                    data["presets.drag_and_drop.enabled"] = True
-                if "presets_order" not in data:
-                    data["presets_order"] = {}
-                updated = True
-
-            # < 2.6.62
-            if old < parse_version("2.6.62"):
-                print("Migrating config from < 2.6.62...")
-                # add: node editor css
-                patch_css('style.light.css', True)
-                patch_css('style.dark.css', True)
-                updated = True
-
-            # < 2.6.65
-            if old < parse_version("2.6.65"):
-                print("Migrating config from < 2.6.65...")
-                # add: status bar css
-                patch_css('style.light.css', True)
-                patch_css('style.dark.css', True)
-                updated = True
-
-            # < 2.6.66
-            if old < parse_version("2.6.66"):
-                print("Migrating config from < 2.6.66...")
-                if "img_mode" not in data:
-                    data["img_mode"] = "image"
-                updated = True
-
-            # < 2.7.0
-            if old < parse_version("2.7.0"):
-                print("Migrating config from < 2.7.0...")
-                # add: combo boxes css
-                patch_css('style.light.css', True)
-                patch_css('style.dark.css', True)
-                updated = True
-
-            # < 2.7.1
-            if old < parse_version("2.7.1"):
-                print("Migrating config from < 2.7.1...")
-                # update: combo boxes css
-                patch_css('style.light.css', True)
-                patch_css('style.dark.css', True)
-                updated = True
-
-            # < 2.7.2
-            if old < parse_version("2.7.2"):
-                print("Migrating config from < 2.7.2...")
-                # fix: combo boxes css width
-                patch_css('style.light.css', True)
-                patch_css('style.dark.css', True)
-                updated = True
-
-            # < 2.7.3
-            if old < parse_version("2.7.3"):
-                print("Migrating config from < 2.7.3...")
-                if "video.remix" not in data:
-                    data["video.remix"] = False
-                if "img.remix" not in data:
-                    data["img.remix"] = False
-                updated = True
-
-            # < 2.7.4
-            if old < parse_version("2.7.4"):
-                print("Migrating config from < 2.7.4...")
-                patch_css('web-chatgpt.css', True)
-                patch_css('web-blocks.css', True)
-                updated = True
-
-            # < 2.7.5
-            if old < parse_version("2.7.5"):
-                print("Migrating config from < 2.7.5...")
-                if "remote_tools.computer_use.sandbox" not in data:
-                    data["remote_tools.computer_use.sandbox"] = False
-                if "remote_tools.google.file_search" not in data:
-                    data["remote_tools.google.file_search"] = False
-                if "remote_tools.google.file_search.args" not in data:
-                    data["remote_tools.google.file_search.args"] = ""
-                if "remote_tools.google.maps" not in data:
-                    data["remote_tools.google.maps"] = False
-                if "remote_store.hide_threads" not in data:
-                    data["remote_store.hide_threads"] = True
-                updated = True
-
-            # < 2.7.7
-            if old < parse_version("2.7.7"):
-                print("Migrating config from < 2.7.7...")
-                to_add = [
-                    "remote_tools.anthropic.code_execution",
-                    "remote_tools.anthropic.file_search",
-                    "remote_tools.anthropic.mcp",
-                    "remote_tools.anthropic.mcp.tools",
-                    "remote_tools.anthropic.mcp.mcp_servers",
-                    "remote_tools.anthropic.web_fetch",
-                    "remote_tools.xai.code_execution",
-                    "remote_tools.xai.mcp",
-                    "remote_tools.xai.mcp.args",
-                    "remote_tools.xai.web_search",
-                    "remote_tools.xai.x_search"
-                ]
-                for key in to_add:
+            # provider-scoped API config introduced in 2.8.33
+            if old < parse_version("2.8.33"):
+                from .patches.patch_before_2_8_33 import Patch as PatchBefore2_8_33
+                patcher = PatchBefore2_8_33(self.window)
+                data, provider_updated, _ = patcher.execute(version)
+                updated = updated or provider_updated
+            # --------------------------------------------
+            # .agents project-directory support introduced in 2.8.34
+            if old < parse_version("2.8.34"):
+                for key in (
+                    "agent.v2.agents_dir.enabled",
+                    "agent.llama.agents_dir.enabled",
+                ):
                     if key not in data:
-                        data[key] = cfg_get_base(key)
-                updated = True
+                        data[key] = True
+                        updated = True
 
-            # < 2.7.8
-            if old < parse_version("2.7.8"):
-                print("Migrating config from < 2.7.8...")
-                to_add = [
-                    "remote_store.hide_threads",
-                    "remote_store.provider",
-                    "api_key_management_xai",
-                    "remote_tools.xai.collections",
-                    "remote_tools.xai.collections.args",
-                ]
-                for key in to_add:
+                # Retired Custom agents/OpenAI-agent settings
+                for key in (
+                        "agent.openai.response.split",
+                ):
+                    if key in data:
+                        del data[key]
+                        updated = True
+
+            # --------------------------------------------
+            # Global filesystem text-editor settings and application runtime
+            # directories introduced in 2.8.35.
+            if old < parse_version("2.8.35"):
+                from .patches.patch_before_2_8_35 import (
+                    migrate_application_runtime_dirs,
+                    migrate_remote_tools,
+                )
+                migrate_application_runtime_dirs(self.window)
+                updated = migrate_remote_tools(data) or updated
+                defaults = {
+                    "filesystem.text_editor.tabs.indent_spaces": True,
+                    "filesystem.text_editor.tabs.width": 4,
+                    "filesystem.text_editor.word_wrap": False,
+                    "layout.canvas.auto_open": True,
+                    "ctx.annotations.clear_on_send.canvas": False,
+                    "ctx.annotations.clear_on_send.files": False,
+                    "ctx.annotations.clear_on_send.chat": True,
+                }
+                for key, value in defaults.items():
                     if key not in data:
-                        data[key] = cfg_get_base(key)
+                        data[key] = value
+                        updated = True
+
+            # --------------------------------------------
+            # Application-wide Add-ons storage introduced in 2.8.36.
+            if old < parse_version("2.8.36"):
+                from .patches.patch_before_2_8_36 import (
+                    migrate_addons_to_application_base,
+                )
+                updated = migrate_addons_to_application_base(self.window) or updated
+
+            if old < parse_version("2.8.38"):
+                if "security.computer.show_warning" not in data:
+                    data["security.computer.show_warning"] = True
+                    updated = True
+                if "model.group_providers" not in data:
+                    data["model.group_providers"] = False
+                    updated = True
+                if data.get("access.microphone.notify") is not True:
+                    data["access.microphone.notify"] = True
+                    updated = True
+                if data.get("attachments_capture_clear") is not False:
+                    data["attachments_capture_clear"] = False
+                    updated = True
+                if "agent.v2.show_tools" not in data:
+                    data["agent.v2.show_tools"] = False
+                    updated = True
+                for key in ("filesystem.preview.markdown.font_size", "filesystem.preview.text.font_size"):
+                    if key not in data:
+                        data[key] = 0  # Use the default font until the first zoom gesture.
+                        updated = True
+
+            # Global external-context gateway and project evidence sharing.
+            if old < parse_version("2.9.1") <= version:
+                from pygpt_net.core.summarizer.summarizer import DEFAULTS
+                if "ctx.attachment.project_share" in data:
+                    del data["ctx.attachment.project_share"]
+                    updated = True
+                for key, value in DEFAULTS.items():
+                    if key not in data:
+                        data[key] = value
+                        updated = True
+
+            # Replace all Dockerfile settings on upgrade to 2.9.0, including
+            # customized values. Subsequent starts keep the saved settings.
+            if old < parse_version("2.9.0"):
+                from pygpt_net.plugin.cmd_system.dockerfile import SYSTEM_DOCKERFILE
+                from pygpt_net.plugin.cmd_code_interpreter.dockerfile import (
+                    IPYTHON_DOCKERFILE,
+                    PYTHON_LEGACY_DOCKERFILE,
+                )
+                plugins = data.setdefault("plugins", {})
+                plugins.setdefault("cmd_system", {})["dockerfile"] = SYSTEM_DOCKERFILE
+                interpreter = plugins.setdefault("cmd_code_interpreter", {})
+                interpreter["dockerfile"] = PYTHON_LEGACY_DOCKERFILE
+                interpreter["ipython_dockerfile"] = IPYTHON_DOCKERFILE
                 updated = True
 
-            # < 2.7.9
-            if old < parse_version("2.7.9"):
-                print("Migrating config from < 2.7.9...")
-                to_add = [
-                    "api_key_management_xai",
-                ]
-                for key in to_add:
-                    if key not in data or data[key] is None or data[key] == "None":
-                        data[key] = ""
-                updated = True
-
-            # < 2.7.12
-            if old < parse_version("2.7.12"):
-                print("Migrating config from < 2.7.12...")
-                if "ctx.attachment.append_once" not in data:
-                    data["ctx.attachment.append_once"] = False
-                if "ctx.attachment.auto_append" not in data:
-                    data["ctx.attachment.auto_append"] = True
+            if old < parse_version("2.9.1"):
+                if "llama.hub.loaders.options" not in data:
+                    data["llama.hub.loaders.options"] = {}
+                    updated = True
+                for key in ("llama.hub.loaders.selected.attachment", "llama.hub.loaders.selected.indexer"):
+                    if key not in data:
+                        data[key] = "webpage"
+                        updated = True
+                if "layout.toolbox.expanded" not in data:
+                    data["layout.toolbox.expanded"] = False
+                    updated = True
+                if "layout.toolbox.placement" not in data:
+                    data["layout.toolbox.placement"] = "middle"
+                    updated = True
+                plugins = data.setdefault("plugins", {})
+                enabled = data.setdefault("plugins_enabled", {})
+                for plugin_id in ("cmd_files", "cmd_code_interpreter", "cmd_system"):
+                    plugins.pop(plugin_id, None)
+                    if enabled.pop(plugin_id, False):
+                        enabled["filesystem"] = True
+                plugins.setdefault("filesystem", {})
+                enabled.setdefault("filesystem", False)
                 updated = True
 
         # update file

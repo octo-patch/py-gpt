@@ -6,12 +6,15 @@
 PyGPT - pygpt.net
 ====================
 
-| **Release:** 2.7.12 (2026-02-06)
-| **Project Website:** https://pygpt.net
+| **Release:** 2.9.1 (2026-10-06)
+| **Official Website:** https://pygpt.net
 | **GitHub:** https://github.com/szczyglis-dev/py-gpt
-| **Snap Store:** https://snapcraft.io/pygpt
+| **Add-ons:** https://github.com/szczyglis-dev/py-gpt-addons
 | **PyPI:** https://pypi.org/project/pygpt-net
+| **AppImage(s):** https://github.com/szczyglis-dev/py-gpt/releases
+| **Snap Store:** https://snapcraft.io/pygpt
 | **Microsoft Store:** https://apps.microsoft.com/detail/XP99R4MX3X65VQ
+| **Donate:** https://www.buymeacoffee.com/szczyglis
 
 .. toctree::
    :maxdepth: 3
@@ -26,12 +29,16 @@ Contents
    requirements
    quick_start
    modes
+   canvas
+   skills
    context
    attachments
+   indexing
    presets
    profiles
    models
    plugins
+   connectors
    tools
    functions
    tokens
@@ -40,5 +47,6 @@ Contents
    updates
    debug
    extending
+   addons_api
    security
    credits

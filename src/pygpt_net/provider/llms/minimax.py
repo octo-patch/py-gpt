@@ -6,106 +6,65 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.07.29 00:00:00                  #
 # ================================================== #
 
-from typing import List, Dict
-
-from llama_index.core.llms.llm import BaseLLM as LlamaBaseLLM
-
-from pygpt_net.core.types import (
-    MODE_CHAT,
-    MODE_LLAMA_INDEX,
-)
+from pygpt_net.core.types import MODE_LLAMA_INDEX
 from pygpt_net.provider.llms.base import BaseLLM
 from pygpt_net.item.model import ModelItem
 
 
 class MiniMaxLLM(BaseLLM):
     def __init__(self, *args, **kwargs):
-        super(MiniMaxLLM, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.id = "minimax"
         self.name = "MiniMax"
-        self.type = [MODE_CHAT, MODE_LLAMA_INDEX]
+        self.type = [MODE_LLAMA_INDEX]
 
-    def completion(
-            self,
-            window,
-            model: ModelItem,
-            stream: bool = False
-    ):
-        """
-        Return LLM provider instance for completion
+    def setup(self) -> dict:
+        return {
+            "openai_compatible": True,
+            "settings": {
+                "api_key": {
+                    "type": "str",
+                    "default": "",
+                    "secret": True,
+                    "urls": {"API Keys": "https://platform.minimax.io"},
+                },
+                "api_base": {
+                    "type": "str",
+                    "default": "https://api.minimax.io/v1",
+                },
+            },
+        }
 
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: LLM provider instance
-        """
-        pass
-
-    def chat(
-            self,
-            window,
-            model: ModelItem,
-            stream: bool = False
-    ):
-        """
-        Return LLM provider instance for chat
-
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: LLM provider instance
-        """
-        pass
-
-    def llama(
-            self,
-            window,
-            model: ModelItem,
-            stream: bool = False
-    ) -> LlamaBaseLLM:
-        """
-        Return LLM provider instance for llama
-
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: LLM provider instance
-        """
+    def llama(self, window, model: ModelItem, stream: bool = False):
+        """Use the same provider and per-model settings as direct Chat."""
         from llama_index.llms.openai_like import OpenAILike
-        args = self.parse_args(model.llama_index, window)
-        if "model" not in args:
-            args["model"] = model.id
-        if "api_key" not in args or args["api_key"] == "":
-            args["api_key"] = window.core.config.get("api_key_minimax", "")
-        if "api_base" not in args or args["api_base"] == "":
-            args["api_base"] = window.core.config.get("api_endpoint_minimax", "https://api.minimax.io/v1")
-        if "is_chat_model" not in args:
-            args["is_chat_model"] = True
-        if "is_function_calling_model" not in args:
-            args["is_function_calling_model"] = model.tool_calls
+
+        args = self.prepare_openai_compatible_args(window, model)
+        args.setdefault("is_chat_model", True)
+        args.setdefault("is_function_calling_model", bool(model.tool_calls))
+        args.setdefault("context_window", model.ctx)
+        reasoning_effort = window.core.models.get_reasoning_effort(model)
+        if reasoning_effort:
+            additional_kwargs = dict(args.get("additional_kwargs") or {})
+            additional_kwargs["reasoning_effort"] = reasoning_effort
+            args["additional_kwargs"] = additional_kwargs
         args = self.inject_llamaindex_http_clients(args, window.core.config)
+        self.log_llama_create(window, model, args, "OpenAILike")
         return OpenAILike(**args)
 
-    def get_models(
-            self,
-            window,
-    ) -> List[Dict]:
-        """
-        Return list of models for the provider
-
-        :param window: window instance
-        :return: list of models
-        """
-        items = []
-        client = self.get_client(window)
-        models_list = client.models.list()
-        if models_list.data:
-            for item in models_list.data:
-                items.append({
-                    "id": item.id,
-                    "name": item.id,
-                })
-        return items
+    def get_models(self, window) -> list[dict]:
+        """Offer current text models without changing saved/custom models."""
+        return [
+            {
+                "id": model_id,
+                "name": model_id,
+                "ctx": 1000000,
+                "tokens": 524288 if model_id == "MiniMax-M3.1-Flash" else 0,
+                "input": ["text", "image", "video"],
+                "tool_calls": True,
+                "reasoning_effort": model_id == "MiniMax-M3.1-Flash",
+            }
+            for model_id in ("MiniMax-M3.1-Flash", "MiniMax-M3")
+        ]

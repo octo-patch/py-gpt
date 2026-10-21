@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.17 19:00:00                  #
+# Updated Date: 2026.08.16 17:40:00                  #
 # ================================================== #
 
 import json
@@ -23,7 +23,12 @@ from pygpt_net.core.types import (
     OPENAI_DISABLE_TOOLS,
 )
 from pygpt_net.core.bridge.context import BridgeContext, MultimodalContext
+from pygpt_net.provider.core.model.compat import is_openai_reasoning_model_id
 from pygpt_net.item.ctx import CtxItem
+from pygpt_net.provider.api.reasoning import (
+    is_realtime_reasoning_enabled, is_tagged_reasoning_model,
+    strip_and_store_tagged_reasoning, strip_tagged_reasoning,
+)
 from pygpt_net.item.model import ModelItem
 
 from .utils import sanitize_name
@@ -83,6 +88,15 @@ class Chat:
             user_name=user_name,
             multimodal_ctx=multimodal_ctx,
         )
+
+        # fix: messages for Mistral
+        if model.provider == "mistral_ai":
+            for msg in messages:
+                if 'name' in msg:
+                    del msg['name']
+                if 'user' in msg:
+                    del msg['user']
+
         msg_tokens = self.window.core.tokens.from_messages(
             messages,
             model.id,
@@ -100,20 +114,19 @@ class Chat:
         # tools / functions
         tools = self.window.core.api.openai.tools.prepare(model, functions)
 
-        # fix: o1 compatibility
-        if (model.id is not None
-                and not model.id.startswith("o1")
-                and not model.id.startswith("o3")
-                and not model.id.startswith("o4")
-                and model.is_gpt()):
-            response_kwargs['presence_penalty'] = self.window.core.config.get('presence_penalty')
-            response_kwargs['frequency_penalty'] = self.window.core.config.get('frequency_penalty')
-            response_kwargs['temperature'] = self.window.core.config.get('temperature')
-            response_kwargs['top_p'] = self.window.core.config.get('top_p')
 
-        # extra arguments, o3 only
-        if model.extra and "reasoning_effort" in model.extra:
-            response_kwargs['reasoning_effort'] = model.extra["reasoning_effort"]
+        # Runtime reasoning effort is a single global preference and is sent
+        # only for models which explicitly support changing it.
+        reasoning_effort = self.window.core.models.get_reasoning_effort(model)
+        if reasoning_effort:
+            if model.provider == "open_router":
+                extra_body = dict(response_kwargs.get("extra_body") or {})
+                reasoning = dict(extra_body.get("reasoning") or {})
+                reasoning["effort"] = reasoning_effort
+                extra_body["reasoning"] = reasoning
+                response_kwargs["extra_body"] = extra_body
+            else:
+                response_kwargs["reasoning_effort"] = reasoning_effort
 
         # tool calls are not supported for some models
         if model.id in OPENAI_DISABLE_TOOLS:
@@ -124,10 +137,10 @@ class Chat:
             response_kwargs['tools'] = tools
 
         if max_tokens > 0:
-            if model.id is None or (not model.id.startswith("o1") and not model.id.startswith("o3")):
-                response_kwargs['max_tokens'] = max_tokens
-            else:
+            if is_openai_reasoning_model_id(model.id):
                 response_kwargs['max_completion_tokens'] = max_tokens
+            else:
+                response_kwargs['max_tokens'] = max_tokens
 
         # audio mode
         if mode in [MODE_AUDIO]:
@@ -146,16 +159,32 @@ class Chat:
             response_kwargs['stream_options'] = {"include_usage": True}
 
         # OpenRouter: add web search remote tool (if enabled)
-        model_id = model.id
+        # Ollama: use actual Ollama model name (get_ollama_model), not just list key
+        model_id = model.id or ""
         if model.provider == "open_router":
             model_id = self.window.core.models.get_openrouter_model(model)
+        elif model.is_ollama():
+            model_id = (model.get_ollama_model() or model.id or "").strip()
+        if not model_id:
+            raise ValueError("Model name is required for the API request. Check that the selected model has a valid model ID.")
 
-        response = client.chat.completions.create(
-            messages=messages,
-            model=model_id,
-            stream=stream,
+        request_kwargs = {
+            "messages": messages,
+            "model": model_id,
+            "stream": stream,
             **response_kwargs,
+        }
+        self.window.core.api.logger.log_input(
+            type="chat.completions.create", provider=str(model.provider or "openai"),
+            kwargs=request_kwargs, input=messages, history=context.history,
+            extra=extra, model=model_id, path="client.chat.completions.create",
         )
+        response = client.chat.completions.create(**request_kwargs)
+        if not stream:
+            self.window.core.api.logger.log_output(
+                type="chat.completions.create", provider=str(model.provider or "openai"),
+                output=response, model=model_id,
+            )
         return response
 
     def build(
@@ -264,7 +293,7 @@ class Chat:
 
                     # ---- tool output ----
                     is_tool_output = False
-                    is_last_item = item == items[-1] if items else False
+                    is_last_item = item is items[-1] if items else False
                     if is_last_item and tool_call_native_enabled and item.extra and isinstance(item.extra, dict):
                         if "tool_calls" in item.extra and isinstance(item.extra["tool_calls"], list):
                             for tool_call in item.extra["tool_calls"]:
@@ -328,6 +357,29 @@ class Chat:
                                                     is_tool_output = True
                                                     break
 
+        # A Files I/O tool may attach a local image only for this continuation.
+        # Tool messages do not have a portable image payload across compatible
+        # chat APIs, so send the image immediately after the tool result as a
+        # normal multimodal user message. The attachment remains runtime-only.
+        if is_tool_output and model.is_image_input() and attachments:
+            runtime_images = {
+                key: attachment
+                for key, attachment in attachments.items()
+                if isinstance(getattr(attachment, "extra", None), dict)
+                and attachment.extra.get("runtime_tool_attachment") is True
+                and getattr(attachment, "path", None)
+                and self.window.core.api.openai.vision.is_image(attachment.path)
+            }
+            if runtime_images:
+                runtime_content = self.window.core.api.openai.vision.build_content(
+                    content="Image attachment returned by the preceding tool for native analysis.",
+                    attachments=runtime_images,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": runtime_content,
+                })
+
         # use vision and audio if available in current model
         if not is_tool_output:  # append current prompt only if not tool output
             content = str(prompt)
@@ -341,6 +393,18 @@ class Chat:
                     content=content,
                     multimodal_ctx=multimodal_ctx,
                 )
+
+            native_refs = self.window.core.attachments.native.get_refs(attachments, "openai")
+            if native_refs:
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                elif not isinstance(content, list):
+                    content = [{"type": "text", "text": str(content or "")}]
+                for ref in native_refs:
+                    content.append({
+                        "type": "file",
+                        "file": {"file_id": ref["id"]},
+                    })
 
             # append current prompt
             messages.append({
@@ -409,6 +473,18 @@ class Chat:
                     ctx.tool_calls = self.window.core.command.unpack_tool_calls(
                         response.choices[0].message.tool_calls,
                     )
+
+        # Local OpenAI-compatible backends (including Ollama) may put raw
+        # reasoning directly in the text as <think>...</think>. Keep it in the
+        # same normalized extra metadata used by native provider reasoning, not
+        # in the assistant output that will be sent back as conversation history.
+        model = self.window.core.models.get(ctx.model) if getattr(ctx, "model", None) else None
+        if is_tagged_reasoning_model(model):
+            provider = str(getattr(model, "provider", "") or "local")
+            if is_realtime_reasoning_enabled(self.window):
+                output = strip_and_store_tagged_reasoning(ctx, output, provider=provider)
+            else:
+                output = strip_tagged_reasoning(output)
 
         ctx.output = output  # set output text
         ctx.set_tokens(

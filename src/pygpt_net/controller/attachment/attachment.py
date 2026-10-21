@@ -6,10 +6,11 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.27 21:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 import os
+import json
 from datetime import datetime
 from typing import Optional, Union
 from urllib.parse import urlparse
@@ -50,12 +51,9 @@ class Attachment:
         else:
             self.window.ui.nodes['attachments.capture_clear'].setChecked(False)
 
-        #  auto-index
-        if self.window.core.config.has('attachments_auto_index') \
-                and self.window.core.config.get('attachments_auto_index'):
-            self.window.ui.nodes['attachments.auto_index'].setChecked(True)
-        else:
-            self.window.ui.nodes['attachments.auto_index'].setChecked(False)
+        self.window.core.config.set('attachments_auto_index', False)
+        self.window.ui.nodes['attachments.auto_index'].setChecked(False)
+        self.window.ui.nodes['attachments.auto_index'].setEnabled(False)
 
         self.window.core.attachments.load()
         self.update()
@@ -65,6 +63,10 @@ class Attachment:
         mode = self.window.core.config.get('mode')
         items = self.window.core.attachments.get_all(mode)
         self.window.ui.chat.input.attachments.update(items)
+        input_node = self.window.ui.nodes.get("input")
+        strip = getattr(input_node, "attachment_strip", None)
+        if strip is not None:
+            strip.sync(items, mode)
         self.update_tab(mode)
 
         if not self.has(mode):
@@ -99,13 +101,7 @@ class Attachment:
         :param mode: mode
         """
         num_files = self.window.core.attachments.count(mode)
-        suffix = ''
-        if num_files > 0:
-            suffix = f' ({num_files})'
-        self.window.ui.tabs['input'].setTabText(
-            1,
-            trans('attachments.tab') + suffix,
-        )
+        self.window.ui.tabs['input'].set_compact_tab_count(1, num_files)
 
     def select(self, mode: str, idx: int):
         """
@@ -286,6 +282,7 @@ class Attachment:
         """Open add attachment file dialog"""
         last_dir = self.window.core.config.get_last_used_dir()
         mode = self.window.core.config.get('mode')
+        added = []
         dialog = QFileDialog(self.window)
         dialog.setDirectory(last_dir)
         dialog.setFileMode(QFileDialog.ExistingFiles)
@@ -304,16 +301,35 @@ class Attachment:
                         path=path,
                         auto_save=False,
                     )
+                    added.append(attachment)
 
             # save attachments and update attachments list
             self.window.core.attachments.save()
             self.update()
+        return added
 
-    def open_add_url(self):
+    def open_add_url(self, loader_id=None, attachment_id=None):
         """Open add attachment URL dialog"""
         self.window.ui.dialog['url'].id = "attachment"
-        self.window.ui.dialog['url'].current = ""
+        self.window.ui.dialog['url'].current = attachment_id or ""
         self.window.ui.dialog['url'].init()
+        self.window.core.idx.ui.loaders.restore_fields(
+            'dialog.url.loader.option', 'dialog.url.loader.config',
+        )
+        if loader_id is not None:
+            self.window.ui.nodes['dialog.url.loader'].set_value(loader_id)
+            self.window.ui.dialog['url'].hook_loader_change(None, loader_id, None)
+        if attachment_id is not None:
+            mode = self.window.core.config.get('mode')
+            item = self.window.core.attachments.get_all(mode).get(attachment_id)
+            if item is not None:
+                for group, values in (('option', item.extra.get('input_params', {})),
+                                      ('config', item.extra.get('input_config', {}))):
+                    for key, value in values.items():
+                        node = self.window.ui.nodes.get(f'dialog.url.loader.{group}.{loader_id}.{key}')
+                        if node is not None:
+                            text = json.dumps(value) if isinstance(value, dict) else (','.join(map(str, value)) if isinstance(value, list) else str(value))
+                            node.setText(text)
         self.window.ui.dialog['url'].resize(800, 400)
         self.window.ui.dialog['url'].show()
 
@@ -324,6 +340,8 @@ class Attachment:
             "dialog.url.loader.option",
             "dialog.url.loader.config",
         )
+        if not result:
+            return
         extra = {
             "loader": loader,
             "input_params": input_params,
@@ -331,18 +349,35 @@ class Attachment:
         }
         provider = self.window.core.idx.indexing.get_loader(loader)
         if provider:
+            extra["loader_name"] = provider.name
+            extra["loader_icon"] = getattr(provider, "icon", "") or ":/icons/language.svg"
             mode = self.window.core.config.get('mode')
-            name = provider.get_external_id(input_params)
-            attachment = self.window.core.attachments.new(
-                mode=mode,
-                name=name,
-                path=name,
-                auto_save=False,
-                type=AttachmentItem.TYPE_URL,
-                extra=extra,
-            )
+            if hasattr(provider, 'get_display_name'):
+                name = provider.get_display_name(input_params)
+                extra["display_name"] = name
+            else:
+                name = provider.get_external_id(input_params)
+            current_id = self.window.ui.dialog['url'].current
+            attachment = self.window.core.attachments.get_all(mode).get(current_id) if current_id else None
+            if attachment is not None:
+                attachment.name = name
+                attachment.path = name
+                attachment.extra = extra
+            else:
+                attachment = self.window.core.attachments.new(
+                    mode=mode,
+                    name=name,
+                    path=name,
+                    auto_save=False,
+                    type=AttachmentItem.TYPE_URL,
+                    extra=extra,
+                )
             self.window.core.attachments.save()
             self.update()
+            input_node = self.window.ui.nodes.get('input')
+            strip = getattr(input_node, 'attachment_strip', None)
+            if strip is not None:
+                strip.show_pending(attachment.id)
             self.window.ui.dialog['url'].close()
 
     def add_url(self, url: str):
@@ -383,7 +418,7 @@ class Attachment:
                 idx=idx,
             )
             if path is not None and path != '' and os.path.exists(path):
-                self.window.controller.files.open_dir(
+                self.window.tools.get("files").paths.reveal(
                     path=path,
                     select=True,
                 )
@@ -402,7 +437,7 @@ class Attachment:
                 idx=idx,
             )
             if path is not None and path != '' and os.path.exists(path):
-                self.window.controller.files.open(
+                self.window.tools.get("files").paths.open(
                     path=path,
                 )
 
@@ -462,13 +497,13 @@ class Attachment:
         """
         if self.window.core.config.has("download.dir") and self.window.core.config.get("download.dir") != "":
             path = os.path.join(
-                self.window.core.config.get_user_dir('data'),
+                self.window.core.filesystem.get_data_dir(),
                 self.window.core.config.get("download.dir"),
                 file_name,
             )
         else:
             path = os.path.join(
-                self.window.core.config.get_user_dir('data'),
+                self.window.core.filesystem.get_data_dir(),
                 file_name,
             )
         return str(path)
@@ -544,7 +579,7 @@ class Attachment:
 
         :param value: value of the checkbox
         """
-        self.window.core.config.set('attachments_auto_index', value)
+        self.window.core.config.set('attachments_auto_index', False)
 
     def is_capture_clear(self) -> bool:
         """
@@ -575,7 +610,7 @@ class Attachment:
         now = datetime.now()
         dt = now.strftime("%Y-%m-%d_%H-%M-%S")
         name = 'clipboard-' + dt
-        path = os.path.join(self.window.controller.painter.common.get_capture_dir(), name + '.png')
+        path = os.path.join(self.window.tools.get("painter").storage.directory(), name + '.png')
         image.save(path, "PNG")
         self.from_clipboard_url(path)
 
@@ -694,4 +729,3 @@ class Attachment:
     def reload(self):
         """Reload attachments"""
         self.setup()
-

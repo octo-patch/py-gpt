@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.10 00:00:00                  #
+# Updated Date: 2026.08.16 19:55:00                  #
 # ================================================== #
 import os
 import pytest
@@ -22,7 +22,8 @@ class DummyUI:
             'input.attachments.ctx.mode.query': MagicMock(),
             'input.attachments.ctx.mode.query_summary': MagicMock(),
             'input.attachments.ctx.mode.full': MagicMock(),
-            'input.attachments.ctx.mode.off': MagicMock()
+            'input.attachments.ctx.mode.off': MagicMock(),
+            'input.attachments.native_upload': MagicMock()
         }
         self.chat = MagicMock()
         self.chat.input = MagicMock()
@@ -39,13 +40,24 @@ class DummyCore:
         self.attachments = MagicMock()
         self.attachments.has = MagicMock(return_value=False)
         self.attachments.get_all = MagicMock(return_value={})
+        self.attachments.native = MagicMock()
+        self.attachments.native.get_model = MagicMock(return_value=None)
+        self.attachments.native.can_upload = MagicMock(return_value=False)
+        self.attachments.native.upload = MagicMock()
+        self.attachments.native.reset = MagicMock()
+        self.attachments.native.get_provider = MagicMock(return_value=None)
+        self.attachments.native.get_refs = MagicMock(return_value=[])
         self.attachments.context = MagicMock()
+        self.attachments.context.is_project_share_enabled = MagicMock(return_value=False)
+        self.attachments.context.get_all = MagicMock(
+            side_effect=lambda meta: meta.get_additional_ctx() if meta is not None and hasattr(meta, "get_additional_ctx") else []
+        )
         self.attachments.context.upload = MagicMock(return_value={'uuid': 'dummy', 'path': 'dummy.txt'})
         self.attachments.context.get_context = MagicMock(return_value="content")
         self.attachments.context.get_used_files = MagicMock(return_value=["file1"])
         self.attachments.context.get_used_urls = MagicMock(return_value=["url1"])
         self.attachments.context.reset = MagicMock()
-        self.attachments.context.get_all = MagicMock(return_value=[])
+        self.attachments.context.get_display_all = MagicMock(return_value=[])
         self.attachments.context.count = MagicMock(return_value=0)
         self.attachments.context.delete = MagicMock()
         self.attachments.context.clear = MagicMock()
@@ -68,13 +80,17 @@ class DummyController:
         self.ctx = MagicMock()
         self.ui = MagicMock()
         self.ui.update_tokens = MagicMock()
+        self.tabs = MagicMock()
         self.files = MagicMock()
+        self.chat = MagicMock()
+        self.chat.input = MagicMock()
 
 class DummyWindow:
     def __init__(self):
         self.core = DummyCore()
         self.ui = DummyUI()
         self.controller = DummyController()
+        self.tools = MagicMock()
         self.threadpool = MagicMock()
         self.dispatch = MagicMock()
 
@@ -91,6 +107,7 @@ class DummyMeta:
 
 class DummyGroup:
     def __init__(self, additional_ctx=None):
+        self.extra = {}
         self.additional_ctx = additional_ctx
         self.additional_ctx_current = []
 
@@ -124,19 +141,12 @@ class TestAttachment:
         assert att.has("any") is False
 
     def test_setup(self, dummy_window):
-        dummy_window.core.config.get = MagicMock(return_value=Attachment.MODE_FULL_CONTEXT)
         att = Attachment(dummy_window)
-        att.setup()
-        dummy_window.ui.nodes['input.attachments.ctx.mode.full'].setChecked.assert_called_with(True)
-        dummy_window.core.config.get = MagicMock(return_value=Attachment.MODE_QUERY_CONTEXT)
-        att.setup()
-        dummy_window.ui.nodes['input.attachments.ctx.mode.query'].setChecked.assert_called_with(True)
-        dummy_window.core.config.get = MagicMock(return_value=Attachment.MODE_QUERY_CONTEXT_SUMMARY)
-        att.setup()
-        dummy_window.ui.nodes['input.attachments.ctx.mode.query_summary'].setChecked.assert_called_with(True)
-        dummy_window.core.config.get = MagicMock(return_value=Attachment.MODE_DISABLED)
-        att.setup()
-        dummy_window.ui.nodes['input.attachments.ctx.mode.off'].setChecked.assert_called_with(True)
+        for saved_mode in ("full", "query", "summary", "disabled"):
+            dummy_window.core.config.get = MagicMock(return_value=saved_mode)
+            att.setup()
+            assert att.mode == Attachment.MODE_FULL_CONTEXT
+            dummy_window.core.config.set.assert_called_with("ctx.attachment.mode", "full")
 
     def test_reload(self, dummy_window):
         att = Attachment(dummy_window)
@@ -146,6 +156,8 @@ class TestAttachment:
 
     def test_handle(self, dummy_window):
         att = Attachment(dummy_window)
+        att.handle_upload_error = MagicMock()
+        att.handle_upload_success = MagicMock()
         with patch('pygpt_net.controller.chat.attachment.AttachmentWorker') as MockWorker:
             worker = MagicMock()
             worker.signals = MagicMock()
@@ -158,8 +170,22 @@ class TestAttachment:
             att.handle("m", "t")
             assert worker.mode == "m"
             assert worker.prompt == "t"
-            worker.signals.error.connect.assert_called_with(att.handle_upload_error)
-            worker.signals.success.connect.assert_called_with(att.handle_upload_success)
+
+            # The callbacks may be wrapped to retain the request/preflight token.
+            # Verify their observable contract instead of their implementation identity.
+            error_cb = worker.signals.error.connect.call_args.args[0]
+            success_cb = worker.signals.success.connect.call_args.args[0]
+            error = Exception("error")
+            error_cb(error)
+            success_cb("ok")
+            error_args = att.handle_upload_error.call_args.args
+            success_args = att.handle_upload_success.call_args.args
+            assert error_args[0] is error
+            assert success_args[0] == "ok"
+            if len(error_args) > 1:
+                assert error_args[1] is None
+            if len(success_args) > 1:
+                assert success_args[1] is None
             dummy_window.threadpool.start.assert_called_with(worker)
 
     def test_is_allowed(self, dummy_window):
@@ -200,7 +226,7 @@ class TestAttachment:
         dummy_window.core.filesystem.packer.is_archive.return_value = False
         dummy_window.core.attachments.context.upload.return_value = {"uuid": "id", "path": "file.txt"}
         att.append_to_meta = MagicMock()
-        res = att.upload_file(a, dummy_meta, "p", False)
+        res = att.upload_file(a, dummy_meta, "p", False, "chat")
         assert res is True
         att.append_to_meta.assert_called()
         assert a.consumed is True
@@ -211,7 +237,8 @@ class TestAttachment:
         a.path = "archive.zip"
         att.is_allowed = MagicMock(return_value=True)
         dummy_window.core.filesystem.packer.is_archive.return_value = True
-        dummy_window.core.attachments.context.upload.return_value = {"uuid": "id", "path": "archive.zip"}
+        dummy_window.core.filesystem.packer.unpack.return_value = "tmp_dir"
+        dummy_window.core.attachments.context.upload.return_value = {"uuid": "id", "name": "file1.txt", "path": "file1.txt"}
         att.append_to_meta = MagicMock()
         def fake_walk(p):
             return [("tmp_dir", [], ["file1.txt"])]
@@ -221,33 +248,117 @@ class TestAttachment:
         monkeypatch.setattr(os.path, "relpath", lambda p, start: p[len(start)+1:] if p.startswith(start + "/") else p)
         monkeypatch.setattr(os.path, "getsize", lambda p: 100)
         att.is_verbose = MagicMock(return_value=True)
-        res = att.upload_file(a, dummy_meta, "p", False)
-        assert res is False
-        # dummy_window.core.filesystem.packer.remove_tmp.assert_called_with("tmp_dir")
+        res = att.upload_file(a, dummy_meta, "p", False, "chat")
+        assert res is True
+        att.append_to_meta.assert_called_once()
+        dummy_window.core.filesystem.packer.remove_tmp.assert_called_with("tmp_dir")
+
+    def test_upload_file_native(self, dummy_window, dummy_meta):
+        att = Attachment(dummy_window)
+        a = AttachmentItem(path="file.txt", name="file.txt")
+        att.is_allowed = MagicMock(return_value=True)
+        dummy_window.core.filesystem.packer.is_archive.return_value = False
+        native_ref = {"provider": "openai", "id": "file_123", "name": "file.txt"}
+        dummy_window.core.attachments.native.can_upload.return_value = True
+        dummy_window.core.attachments.native.upload.return_value = native_ref
+        dummy_window.core.attachments.context.create_native_item.return_value = {
+            "uuid": "id",
+            "name": "file.txt",
+            "path": "file.txt",
+            "type": "native_file",
+        }
+        att.append_to_meta = MagicMock()
+
+        res = att.upload_file(a, dummy_meta, "p", False, "chat")
+
+        assert res is True
+        dummy_window.core.attachments.native.upload.assert_called_once_with(
+            "file.txt", "chat", None
+        )
+        dummy_window.core.attachments.context.upload.assert_not_called()
+        att.append_to_meta.assert_called_once()
+        assert a.extra["native_files"] == [native_ref]
+        assert a.consumed is True
+
+    def test_native_upload_failure_falls_back_to_local(self, dummy_window, dummy_meta):
+        att = Attachment(dummy_window)
+        a = AttachmentItem(path="file.txt", name="file.txt")
+        att.is_allowed = MagicMock(return_value=True)
+        dummy_window.core.filesystem.packer.is_archive.return_value = False
+        dummy_window.core.attachments.native.can_upload.return_value = True
+        dummy_window.core.attachments.native.upload.side_effect = RuntimeError("upload failed")
+        dummy_window.core.attachments.context.upload.return_value = {
+            "uuid": "id", "name": "file.txt", "path": "file.txt"
+        }
+        att.append_to_meta = MagicMock()
+
+        res = att.upload_file(a, dummy_meta, "p", False, "chat")
+
+        assert res is True
+        dummy_window.core.attachments.context.upload.assert_called_once()
+        att.append_to_meta.assert_called_once()
+        assert a.consumed is True
+
+    def test_native_upload_verbose_uses_print(self, dummy_window):
+        att = Attachment(dummy_window)
+        att.is_verbose = MagicMock(return_value=True)
+        dummy_window.core.attachments.native.can_upload.return_value = True
+        dummy_window.core.attachments.native.upload.return_value = {
+            "provider": "openai", "id": "file_123"
+        }
+
+        with patch("builtins.print") as mock_print:
+            ref = att._try_native_upload(
+                "file.txt", "chat", None, "file.txt"
+            )
+
+        assert ref["id"] == "file_123"
+        mock_print.assert_any_call("Uploading native attachment: file.txt")
+        mock_print.assert_any_call(
+            "Native upload completed: file.txt (openai)"
+        )
 
     def test_append_to_meta(self, dummy_window, dummy_meta):
         att = Attachment(dummy_window)
         item = {"k": "v"}
         dummy_meta.additional_ctx = None
         att.append_to_meta(dummy_meta, item)
-        assert dummy_meta.additional_ctx is not None
+        assert dummy_meta.additional_ctx == [item]
         dummy_meta.additional_ctx = []
         group = DummyGroup()
         dummy_meta.group = group
+        dummy_window.core.attachments.context.is_project_share_enabled.return_value = True
         att.append_to_meta(dummy_meta, item)
-        assert group.additional_ctx is not None
+        assert group.additional_ctx == [item]
+        assert dummy_meta.additional_ctx == []
+        assert dummy_meta.additional_ctx_current[-1] == item
+
+    @pytest.mark.parametrize("bulk, explicit, expected", [
+        (False, None, False), (True, None, False),
+        (True, False, False), (False, True, True),
+    ])
+    def test_new_project_attachment_sharing(self, dummy_window, dummy_meta, bulk, explicit, expected):
+        dummy_meta.group = DummyGroup()
+        dummy_meta.group.extra["attachment_share_all"] = bulk
+        attachment = AttachmentItem()
+        if explicit is not None:
+            attachment.extra["project_active"] = explicit
+        item = {"uuid": "new"}
+        Attachment(dummy_window).append_to_meta(dummy_meta, item, attachment)
+        assert item["project_active"] is expected
+        assert item.get("active", True) is True
 
     def test_upload_web(self, dummy_window, dummy_meta):
         att = Attachment(dummy_window)
         a = MagicMock()
         a.path = "file.txt"
         att.upload_file = MagicMock(return_value=True)
-        res = att.upload_web(a, dummy_meta, "p", False)
+        res = att.upload_web(a, dummy_meta, "p", False, "chat")
         assert res is True
 
     def test_has_context(self, dummy_window, dummy_meta):
         att = Attachment(dummy_window)
-        dummy_meta.has_additional_ctx = MagicMock(return_value=True)
+        dummy_meta.additional_ctx = [{"type": "text"}]
         assert att.has_context(dummy_meta) is True
         assert att.has_context(None) is False
 
@@ -260,7 +371,7 @@ class TestAttachment:
     def test_get_mode(self, dummy_window):
         att = Attachment(dummy_window)
         att.mode = "custom"
-        assert att.get_mode() == "custom"
+        assert att.get_mode() == "full"
 
     def test_get_context(self, dummy_window):
         att = Attachment(dummy_window)
@@ -292,12 +403,12 @@ class TestAttachment:
         dummy_window.ui.chat.input.attachments_ctx.update.assert_called()
 
     def test_update_tab(self, dummy_window, dummy_meta):
-        dummy_meta.has_additional_ctx = MagicMock(return_value=True)
-        dummy_window.core.attachments.context.get_all.return_value = []
+        dummy_meta.additional_ctx = ["ctx-file"]
         dummy_window.core.attachments.context.count.return_value = 2
         att = Attachment(dummy_window)
         att.update_tab(dummy_meta)
-        dummy_window.ui.tabs['input'].setTabText.assert_called()
+        dummy_window.core.attachments.context.count.assert_called_once_with(dummy_meta)
+        dummy_window.ui.tabs['input'].set_compact_tab_count.assert_called_once_with(3, 2)
 
     def test_is_verbose(self, dummy_window):
         dummy_window.core.config.get = MagicMock(return_value=True)
@@ -323,13 +434,15 @@ class TestAttachment:
         att.delete_by_idx(0, force=False)
         dummy_window.ui.dialogs.confirm.assert_called()
         dummy_meta.additional_ctx = [{"k": "v"}]
-        dummy_window.core.attachments.context.get_all.return_value = [{"k": "v"}]
+        dummy_window.core.attachments.context.get_display_all.return_value = [{"k": "v"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
         att.delete_by_idx(0, force=True)
         # dummy_window.core.attachments.context.delete.assert_called()
         # dummy_window.controller.ctx.update.assert_called()
 
-    def test_clear(self, dummy_window, dummy_meta):
+    @pytest.mark.parametrize("show_icons", [False, True])
+    def test_clear(self, dummy_window, dummy_meta, monkeypatch, show_icons):
+        monkeypatch.setattr("pygpt_net.ui.layout.ctx.ctx_list.SHOW_ATTACHMENT_ICONS", show_icons)
         att = Attachment(dummy_window)
         att.clear(force=False)
         dummy_window.ui.dialogs.confirm.assert_called()
@@ -337,7 +450,7 @@ class TestAttachment:
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
         att.clear(force=True, remove_local=True)
         dummy_window.core.attachments.context.clear.assert_called_with(dummy_meta, delete_files=True)
-        dummy_window.controller.ctx.update.assert_called()
+        assert dummy_window.controller.ctx.update.called is show_icons
 
     def test_select(self, dummy_window):
         att = Attachment(dummy_window)
@@ -346,40 +459,40 @@ class TestAttachment:
     def test_open_by_idx(self, dummy_window, dummy_meta, monkeypatch):
         dummy_meta.additional_ctx = [{"path": "file.txt"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
-        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
+        dummy_window.core.attachments.context.get_display_all.return_value = dummy_meta.additional_ctx
         monkeypatch.setattr(os.path, "exists", lambda p: True)
         monkeypatch.setattr(os.path, "isfile", lambda p: True)
         att = Attachment(dummy_window)
         att.open_by_idx(0)
-        dummy_window.controller.files.open.assert_called_with("file.txt")
+        dummy_window.tools.get("files").paths.open.assert_called_with("file.txt")
 
     def test_open_dir_src_by_idx(self, dummy_window, dummy_meta, monkeypatch):
         dummy_meta.additional_ctx = [{"path": "dir/file.txt"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
-        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
+        dummy_window.core.attachments.context.get_display_all.return_value = dummy_meta.additional_ctx
         monkeypatch.setattr(os.path, "exists", lambda p: True)
         monkeypatch.setattr(os.path, "isdir", lambda p: True)
         monkeypatch.setattr(os.path, "dirname", lambda p: "dir")
         att = Attachment(dummy_window)
         att.open_dir_src_by_idx(0)
-        dummy_window.controller.files.open.assert_called_with("dir")
+        dummy_window.tools.get("files").paths.open.assert_called_with("dir")
 
     def test_open_dir_dest_by_idx(self, dummy_window, dummy_meta, monkeypatch):
         dummy_meta.additional_ctx = [{"uuid": "uid", "path": "file.txt"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
-        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
+        dummy_window.core.attachments.context.get_display_all.return_value = dummy_meta.additional_ctx
         dummy_window.core.attachments.context.get_dir.return_value = "root_dir"
         monkeypatch.setattr(os.path, "exists", lambda p: True)
         monkeypatch.setattr(os.path, "isdir", lambda p: True)
         monkeypatch.setattr(os.path, "join", lambda *args: "/".join(args))
         att = Attachment(dummy_window)
         att.open_dir_dest_by_idx(0)
-        dummy_window.controller.files.open.assert_called_with("root_dir/uid")
+        dummy_window.tools.get("files").paths.open.assert_called_with("root_dir/uid")
 
     def test_has_file_by_idx(self, dummy_window, dummy_meta, monkeypatch):
         dummy_meta.additional_ctx = [{"path": "file.txt"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
-        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
+        dummy_window.core.attachments.context.get_display_all.return_value = dummy_meta.additional_ctx
         monkeypatch.setattr(os.path, "exists", lambda p: True)
         monkeypatch.setattr(os.path, "isfile", lambda p: True)
         att = Attachment(dummy_window)
@@ -390,7 +503,7 @@ class TestAttachment:
     def test_has_src_by_idx(self, dummy_window, dummy_meta, monkeypatch):
         dummy_meta.additional_ctx = [{"real_path": "dir/file.txt", "path": "dir/file.txt"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
-        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
+        dummy_window.core.attachments.context.get_display_all.return_value = dummy_meta.additional_ctx
         monkeypatch.setattr(os.path, "exists", lambda p: True)
         monkeypatch.setattr(os.path, "isdir", lambda p: True)
         att = Attachment(dummy_window)
@@ -399,7 +512,7 @@ class TestAttachment:
     def test_has_dest_by_idx(self, dummy_window, dummy_meta, monkeypatch):
         dummy_meta.additional_ctx = [{"uuid": "uid", "path": "file.txt"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
-        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
+        dummy_window.core.attachments.context.get_display_all.return_value = dummy_meta.additional_ctx
         dummy_window.core.attachments.context.get_dir.return_value = "root_dir"
         monkeypatch.setattr(os.path, "exists", lambda p: True)
         monkeypatch.setattr(os.path, "isdir", lambda p: True)
@@ -410,10 +523,11 @@ class TestAttachment:
     def test_get_current_tokens(self, dummy_window, dummy_meta):
         dummy_meta.additional_ctx = [{"tokens": "5"}, {"tokens": "notanumber"}]
         dummy_window.core.ctx.get_current_meta.return_value = dummy_meta
+        dummy_window.core.attachments.context.get_all.return_value = dummy_meta.additional_ctx
         att = Attachment(dummy_window)
         att.mode = Attachment.MODE_FULL_CONTEXT
         tokens = att.get_current_tokens()
-        assert tokens == 5
+        assert tokens == 0
 
     def test_handle_upload_error(self, dummy_window):
         att = Attachment(dummy_window)
@@ -421,7 +535,7 @@ class TestAttachment:
         att.window.dispatch = MagicMock()
         att.handle_upload_error(err)
         event = att.window.dispatch.call_args[0][0]
-        assert event.data["msg"] == "Error reading attachments: error"
+        assert event.data["msg"] == "Error processing attachments: error"
 
     def test_handle_upload_success(self, dummy_window):
         att = Attachment(dummy_window)
@@ -432,13 +546,20 @@ class TestAttachment:
         assert isinstance(ctx, BridgeContext)
         assert ctx.prompt == "txt"
 
+    def test_toggle_native_upload(self, dummy_window):
+        att = Attachment(dummy_window)
+        att.toggle_native_upload(True)
+        assert att.native_upload is True
+        dummy_window.core.config.set.assert_called_with("ctx.attachment.native_upload", True)
+        dummy_window.core.config.save.assert_called_once()
+
     def test_switch_mode(self, dummy_window):
         att = Attachment(dummy_window)
         att.window.core.config.set = MagicMock()
         att.window.core.config.save = MagicMock()
         att.window.controller.ui.update_tokens = MagicMock()
         att.switch_mode("new")
-        assert att.mode == "new"
-        att.window.core.config.set.assert_called_with("ctx.attachment.mode", "new")
+        assert att.mode == "full"
+        att.window.core.config.set.assert_called_with("ctx.attachment.mode", "full")
         att.window.core.config.save.assert_called_once()
         att.window.controller.ui.update_tokens.assert_called_once()

@@ -39,12 +39,16 @@ def make_window():
     models.get = lambda key: None
     models.is_tool_call_allowed = lambda mode, model_data: True
     experts = SimpleNamespace(get_functions=lambda: [])
-    debug = SimpleNamespace(log=Mock())
+    debug = SimpleNamespace(log=Mock(), warning=Mock())
     core = SimpleNamespace(prompt=prompt, config=config, ctx=ctx, models=models, experts=experts, debug=debug)
     presets = SimpleNamespace(get_current_functions=lambda: [])
     plugins = SimpleNamespace(is_type_enabled=lambda t: False)
     agent = SimpleNamespace(
-        legacy=SimpleNamespace(enabled=lambda check_inline=True: False, get_functions=lambda: []),
+        legacy=SimpleNamespace(
+            enabled=lambda check_inline=True: False,
+            get_functions=lambda: [],
+            is_tool_enabled=lambda cmd: False,
+        ),
         experts=SimpleNamespace(enabled=lambda: False)
     )
     controller = SimpleNamespace(presets=presets, plugins=plugins, agent=agent)
@@ -110,7 +114,7 @@ def test_has_cmds_and_extract_cmd_variants():
     assert cmds[1]["cmd"] == "read"
     assert command.extract_cmd('not a json') is None
     assert command.extract_cmd('{"cmd":"ok","params":{"x":1}}') == {"cmd": "ok", "params": {"x": 1}}
-    assert command.extract_cmd('{"read_file": {"path": ["my_cars.txt"]}}') == {"cmd": "read_file", "params": {"path": ["my_cars.txt"]}}
+    assert command.extract_cmd('{"fs_read_file": {"path": ["my_cars.txt"]}}') == {"cmd": "fs_read_file", "params": {"path": ["my_cars.txt"]}}
 
 
 def test_from_commands_filters_without_cmd():
@@ -147,20 +151,24 @@ def test_unpack_tool_calls_responses_parses_and_skips_missing_name():
 
 def test_unpack_tool_calls_chunks_with_append_output_and_error():
     window = make_window()
-    window.core.debug.log.reset_mock()
+    window.core.debug.warning.reset_mock()
     ctx = SimpleNamespace(tool_calls=None, extra={}, input=None, output=None)
     tool_calls = [
         {"id": "1", "function": {"name": "f", "arguments": json.dumps({"a": 1})}},
         {"id": "2", "function": {"name": "f2", "arguments": {"not": "str"}}},
         {"id": "3", "function": {"name": "f3", "arguments": "badjson"}},
     ]
+
     command = Command(window)
     command.unpack_tool_calls_chunks(ctx, tool_calls, append_output=True)
-    assert isinstance(ctx.tool_calls, list)
-    assert len(ctx.tool_calls) == 1
+
+    assert [call["id"] for call in ctx.tool_calls] == ["1", "2"]
+    assert ctx.tool_calls[0]["function"]["arguments"] == {"a": 1}
+    assert ctx.tool_calls[1]["function"]["arguments"] == {"not": "str"}
     assert ctx.extra["tool_calls"] == ctx.tool_calls
     assert ctx.extra["tool_output"] == []
-    assert window.core.debug.log.called
+    window.core.debug.warning.assert_called_once()
+    assert "invalid JSON arguments" in window.core.debug.warning.call_args.args[0]
 
 
 def test_unpack_tool_calls_from_llama_parses_and_logs_on_error():
@@ -215,33 +223,38 @@ def test_get_functions_merges_native_and_user(monkeypatch):
     monkeypatch.setattr(command, "is_native_enabled", lambda force=False: False)
     assert command.get_functions() == [{"name": "user"}]
     monkeypatch.setattr(command, "is_native_enabled", lambda force=False: True)
-    monkeypatch.setattr(command, "as_native_functions", lambda all=False, parent_id=None: [{"name": "native"}])
+    monkeypatch.setattr(command, "as_native_functions", lambda all=False, parent_id=None, ctx=None: [{"name": "native"}])
     assert command.get_functions() == [{"name": "native"}, {"name": "user"}]
 
 
 def test_as_native_functions_dispatch_and_agent_expert_calls(monkeypatch):
     window = make_window()
+    window.core.config["cmd"] = True
     def dispatch(event):
-        if event.type == Event.CMD_SYNTAX:
-            event.data["cmd"] = [{"cmd": "plugin_cmd", "instruction": "p"}]
-        elif event.type == Event.CMD_SYNTAX_INLINE:
+        if event.name == Event.CMD_SYNTAX:
+            event.data["cmd"] = [
+                {"cmd": "plugin_cmd", "instruction": "p"},
+                {"cmd": "expert_cmd", "instruction": "e"},
+            ]
+        elif event.name == Event.CMD_SYNTAX_INLINE:
             event.data["cmd"] = [{"cmd": "inline_cmd", "instruction": "i"}]
     window.dispatch = dispatch
     window.controller.agent.legacy = SimpleNamespace(enabled=lambda check_inline=True: True, get_functions=lambda: [{"cmd": "agent_cmd", "instruction": "a"}])
-    window.controller.agent.experts = SimpleNamespace(enabled=lambda: False)
-    window.core.experts = SimpleNamespace(get_functions=lambda: [{"cmd": "expert_cmd", "instruction": "e"}])
     command = Command(window)
     def fake_cmds_to_functions(cmds):
+        names = []
         if any(c.get("cmd") == "plugin_cmd" for c in cmds):
-            return [{"name": "plugin"}]
-        if any(c.get("cmd") == "agent_cmd" for c in cmds):
-            return [{"name": "agent"}]
+            names.append({"name": "plugin"})
         if any(c.get("cmd") == "expert_cmd" for c in cmds):
-            return [{"name": "expert"}]
-        return []
+            names.append({"name": "expert"})
+        if any(c.get("cmd") == "agent_cmd" for c in cmds):
+            names.append({"name": "agent"})
+        return names
     monkeypatch.setattr(command, "cmds_to_functions", fake_cmds_to_functions)
     out = command.as_native_functions(all=False, parent_id=None)
-    assert {"name": "agent"} in out and {"name": "expert"} in out
+    assert {"name": "plugin"} in out
+    assert {"name": "expert"} in out
+    assert {"name": "agent"} in out
 
 
 def test_cmds_to_functions_and_extract_params_behavior():
@@ -297,12 +310,9 @@ def test_is_native_enabled_various_branches():
     window.core.models.is_tool_call_allowed = lambda mode, model_data: False
     assert command.is_native_enabled() is False
     window.core.models.is_tool_call_allowed = lambda mode, model_data: True
-    window.controller.agent.legacy = SimpleNamespace(enabled=lambda check_inline=True: True)
-    window.core.config['agent.func_call.native'] = True
+    window.core.config['func_call.native'] = True
     assert command.is_native_enabled() is True
-    window.controller.agent.legacy = SimpleNamespace(enabled=lambda check_inline=True: False)
-    window.controller.agent.experts = SimpleNamespace(enabled=lambda: True)
-    window.core.config['experts.func_call.native'] = False
+    window.core.config['func_call.native'] = False
     assert command.is_native_enabled() is False
     window.core.config['func_call.native'] = True
     assert command.is_native_enabled(force=True) is True
@@ -337,3 +347,13 @@ def test_is_model_supports_tools_always_true():
         def get_provider(self):
             return "ollama"
     assert command.is_model_supports_tools("any", M()) is True
+
+def test_native_function_output_keeps_streams_and_exit_status():
+    command = Command(make_window())
+    response = {'request': {'cmd': 'shell_exec'}, 'result': False,
+                'stdout': 'stdout once', 'stderr': 'stderr once', 'return_code': 4}
+    ctx = SimpleNamespace(tool_calls=[{'id': 'call-1', 'function': {'name': 'shell_exec'}}],
+                          input=json.dumps([response]), extra={})
+    outputs = command.get_tool_calls_outputs(ctx)
+    assert outputs == [{'tool_call_id': 'call-1', 'output': {
+        'result': False, 'stdout': 'stdout once', 'stderr': 'stderr once', 'return_code': 4}}]

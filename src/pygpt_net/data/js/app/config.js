@@ -13,7 +13,8 @@ class Config {
 			AUTO_FOLLOW_REENABLE_PX: Utils.g('AUTO_FOLLOW_REENABLE_PX', 8),
 			SCROLL_NEAR_MARGIN_PX: Utils.g('SCROLL_NEAR_MARGIN_PX', 450),
 			INTERACTION_BUSY_MS: Utils.g('UI_INTERACTION_BUSY_MS', 140),
-			ZOOM_BUSY_MS: Utils.g('UI_ZOOM_BUSY_MS', 300)
+			ZOOM_BUSY_MS: Utils.g('UI_ZOOM_BUSY_MS', 300),
+			MESSAGE_VIRTUAL_KEEP_RECENT: Utils.g('MESSAGE_VIRTUAL_KEEP_RECENT', 2)
 		};
 
 		// FAB (floating action button) visibility and debounce.
@@ -25,7 +26,8 @@ class Config {
 		// Highlighting controls and per-frame budget.
 		this.HL = {
 			PER_FRAME: Utils.g('HL_PER_FRAME', 2),
-			DISABLE_ALL: Utils.g('DISABLE_SYNTAX_HIGHLIGHT', false)
+			DISABLE_ALL: Utils.g('DISABLE_SYNTAX_HIGHLIGHT', false),
+			STREAM_THROTTLE_MS: Utils.g('HL_STREAM_THROTTLE_MS', 300)
 		};
 
 		// Intersection-like margins (we do our own scan, but these guide budgets).
@@ -48,6 +50,14 @@ class Config {
 		};
 
 		// Stream (snapshot) budgets and queue limits.
+		// Live provider reasoning/thinking UI. Values are injected by Python.
+		this.REASONING = {
+			SHOW_REALTIME: Boolean(Utils.g('REASONING_SHOW_REALTIME', false)),
+			HIDE_AFTER_RESPONSE: Boolean(Utils.g('REASONING_HIDE_AFTER_RESPONSE', true)),
+			FADE_OUT_DELAY_MS: Math.max(0, Number(Utils.g('REASONING_FADE_OUT_DELAY_MS', 1000)) || 0),
+			FADE_DURATION_MS: Math.max(0, Number(Utils.g('REASONING_FADE_DURATION_MS', 180)) || 0)
+		};
+
 		this.STREAM = {
 			MAX_PER_FRAME: Utils.g('STREAM_MAX_PER_FRAME', 8),
 			EMERGENCY_COALESCE_LEN: Utils.g('STREAM_EMERGENCY_COALESCE_LEN', 300),
@@ -78,6 +88,8 @@ class Config {
 
 		// Localized UI strings.
 		this.LOCALE = {
+			TOOL_VIEW_PLAIN: Utils.g('LOCALE_TOOL_VIEW_PLAIN', 'Plain text'),
+			TOOL_VIEW_RAW: Utils.g('LOCALE_TOOL_VIEW_RAW', 'Raw JSON'),
 			PREVIEW: Utils.g('LOCALE_PREVIEW', 'Preview'),
 			RUN: Utils.g('LOCALE_RUN', 'Run'),
 			COLLAPSE: Utils.g('LOCALE_COLLAPSE', 'Collapse'),
@@ -106,7 +118,7 @@ class Config {
 			softLatency: 1200,
 			minLinesForHL: Utils.g('PROFILE_CODE_HL_N_LINE', 25),
 			minCharsForHL: Utils.g('PROFILE_CODE_HL_N_CHARS', 5000),
-			promoteMinInterval: 300,
+			promoteMinInterval: Utils.g('HL_STREAM_THROTTLE_MS', 300),
 			promoteMaxLatency: 800,
 			promoteMinLines: Utils.g('PROFILE_CODE_HL_N_LINE', 25),
 			adaptiveStep: Utils.g('PROFILE_CODE_ADAPTIVE_STEP', false),

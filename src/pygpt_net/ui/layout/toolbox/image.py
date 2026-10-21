@@ -6,10 +6,10 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.30 22:00:00                  #
+# Updated Date: 2026.09.03 14:25:00                  #
 # ================================================== #
 
-from PySide6.QtWidgets import QVBoxLayout, QWidget, QHBoxLayout
+from PySide6.QtWidgets import QVBoxLayout, QWidget, QHBoxLayout, QSizePolicy
 
 from pygpt_net.ui.widget.option.combo import OptionCombo
 from pygpt_net.ui.widget.option.input import OptionInput
@@ -45,14 +45,33 @@ class Image:
         conf_global = ui.config['global']
 
         container = QWidget(parent=self.window)
-        ui.nodes['dalle.options'] = container
+        container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        container.setMinimumWidth(0)
+        ui.nodes['image.options'] = container
 
         conf_global['img_variants'] = OptionInput(self.window, 'global', 'img_variants', option)
         conf_global['img_variants'].setToolTip(trans("toolbox.img_variants.label"))
 
         option_resolutions = self.window.core.image.get_resolution_option()
         conf_global['img_resolution'] = OptionCombo(self.window, 'global', 'img_resolution', option_resolutions)
-        conf_global['img_resolution'].setMinimumWidth(160)
+        conf_global['img_resolution'].setToolTip(trans("settings.img_resolution.desc"))
+
+        option_aspect_ratio = self.window.core.image.get_xai_aspect_ratio_option()
+        conf_global['img.aspect_ratio'] = OptionCombo(
+            self.window, 'global', 'img.aspect_ratio', option_aspect_ratio
+        )
+        conf_global['img.aspect_ratio'].setToolTip(trans("settings.video.aspect_ratio"))
+        # The xAI-only field starts hidden; Mode.update() toggles it for xAI image models.
+        conf_global['img.aspect_ratio'].setVisible(False)
+        ui.nodes['image.aspect_ratio'] = conf_global['img.aspect_ratio']
+
+        # Keep media options shrinkable inside the fixed-minimum toolbox.
+        conf_global['img_resolution'].setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        conf_global['img_resolution'].setMinimumWidth(0)
+        conf_global['img.aspect_ratio'].setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        conf_global['img.aspect_ratio'].setMinimumWidth(0)
+        conf_global['img_variants'].setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        conf_global['img_variants'].setMinimumWidth(0)
 
         conf_global['img.remix'] = ToggleLabel(trans("img.remix"), parent=self.window)
         conf_global['img.remix'].box.setToolTip(trans("img.remix.tooltip"))
@@ -60,13 +79,14 @@ class Image:
 
         cols = QHBoxLayout()
         cols.addWidget(conf_global['img_resolution'], 3)
+        cols.addWidget(conf_global['img.aspect_ratio'], 3)
         cols.addWidget(conf_global['img_variants'], 1)
-        cols.setContentsMargins(2, 5, 5, 5)
+        cols.setContentsMargins(2, 5, 0, 5)
 
         rows = QVBoxLayout()
         rows.addLayout(cols)
         rows.addWidget(conf_global['img.remix'])
-        rows.setContentsMargins(2, 5, 5, 5)
+        rows.setContentsMargins(2, 5, 0, 5)
 
         container.setLayout(rows)
         container.setContentsMargins(2, 0, 0, 10)

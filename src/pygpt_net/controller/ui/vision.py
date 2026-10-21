@@ -20,6 +20,7 @@ from pygpt_net.core.types import (
     MODE_VISION,
     MULTIMODAL_IMAGE,
     MODE_AGENT_OPENAI,
+    MODE_AGENT_V2,
 )
 
 class Vision:
@@ -49,6 +50,7 @@ class Vision:
             MODE_LLAMA_INDEX,
             MODE_AGENT,
             MODE_AGENT_OPENAI,
+            MODE_AGENT_V2,
             MODE_RESEARCH,
             MODE_EXPERT,
         ):
@@ -60,7 +62,7 @@ class Vision:
         ctrl = self.window.controller
         camera = ctrl.camera
 
-        if ctrl.painter.is_active():
+        if self.window.tools.get("painter").is_active():
             camera.setup()
             camera.show_camera()
             return

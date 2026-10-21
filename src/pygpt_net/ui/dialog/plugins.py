@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.06 20:00:00                  #
+# Updated Date: 2026.09.29 19:30:00                  #
 # ================================================== #
 
 from PySide6.QtCore import Qt
@@ -99,6 +99,7 @@ class Plugins:
             options = plugin.setup()
 
             # extract tab ids, general is default
+            nested_tab_ids = self.nested_option_tabs(options)
             tab_ids = self.extract_option_tabs(options)
             for tab_id in tab_ids:
                 content_tabs[tab_id] = QVBoxLayout()
@@ -117,7 +118,7 @@ class Plugins:
 
             # append URLs at the beginning
             if len(plugin.urls) > 0:
-                tab_id = "general"
+                tab_id = "general" if "general" in content_tabs else next(iter(content_tabs))
                 urls_widget = self.add_urls(plugin.urls)
                 content_tabs[tab_id].addWidget(urls_widget)
 
@@ -125,11 +126,7 @@ class Plugins:
                 if key in advanced_keys:  # hide advanced options
                     continue
 
-                tab_id = "general"
-                if 'tab' in options[key]:
-                    tab = options[key]['tab']
-                    if tab is not None and tab != "":
-                        tab_id = tab
+                tab_id = self.option_tab_key(options[key], nested_tab_ids)
 
                 content_tabs[tab_id].addLayout(
                     self.add_option(
@@ -147,11 +144,7 @@ class Plugins:
                     if key not in advanced_keys:  # ignore non-advanced options
                         continue
 
-                    tab_id = "general"
-                    if 'tab' in options[key]:
-                        tab = options[key]['tab']
-                        if tab is not None and tab != "":
-                            tab_id = tab
+                    tab_id = self.option_tab_key(options[key], nested_tab_ids)
                     if tab_id not in groups:
                         full_id = group_id + '.' + tab_id
                         groups[tab_id] = CollapsedGroup(self.window, full_id, None, False, None)
@@ -175,7 +168,7 @@ class Plugins:
             desc_key = f"plugin.settings.{id}.desc"
             desc_txt = plugin.description
             if plugin.use_locale:
-                domain = f"plugin.{plugin.id}"
+                domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else f"plugin.{plugin.id}"
                 translated_name = trans('plugin.name', False, domain)
                 translated_desc = trans('plugin.description', False, domain)
                 if translated_name != 'plugin.name':
@@ -189,46 +182,18 @@ class Plugins:
 
             line = self.add_line()
 
-            # tabs or no tabs
-            if len(content_tabs) > 1:
-                # add tabs
-                tab_widget = QTabWidget()
-
-                # sort to make general tab first if exists
-                if "general" in content_tabs:
-                    content_tabs = {"general": content_tabs.pop("general")} | content_tabs
-
-                for tab_id in content_tabs:
-                    tab_name = tab_id
-                    # if translation, translate tab name
-                    if tab_id in plugin.tabs:
-                        tab_name = plugin.tabs[tab_id]
-                        if tab_id == "general":
-                            tab_name = trans("plugin.tab.general")
-                    else:
-                        tab_name = tab_name.replace("_", " ").capitalize()
-                    scroll_widget = QWidget()
-                    scroll_widget.setLayout(content_tabs[tab_id])
-                    scroll_tabs[tab_id].setWidget(scroll_widget)
-                    tab_widget.addTab(scroll_tabs[tab_id], tab_name)
-
-                area = QVBoxLayout()
-                area.addWidget(self.window.ui.nodes[desc_key])
-                area.addWidget(line)
-                area.addWidget(tab_widget)
-            else:
-                # scroll widget
-                scroll_widget = QWidget()
-                scroll_widget.setLayout(content_tabs["general"])
-                scroll_tabs["general"].setWidget(scroll_widget)
-
-                area = QVBoxLayout()
-                area.addWidget(self.window.ui.nodes[desc_key])
-                area.addWidget(line)
-                area.addWidget(scroll_tabs["general"])
+            tab_widget = self.build_option_tab_widget(plugin, content_tabs, scroll_tabs)
+            area = QVBoxLayout()
+            area.addWidget(self.window.ui.nodes[desc_key])
+            area.addWidget(line)
+            area.addWidget(tab_widget)
 
             area_widget = QWidget()
             area_widget.setLayout(area)
+            # Keep a stable plugin identity on the tab. Tab/list positions may
+            # differ after a runtime language change because translated plugin
+            # names can sort differently.
+            area_widget.setProperty('plugin_id', id)
 
             # append to tab
             self.window.ui.tabs['plugin.settings'].addTab(area_widget, name_txt)
@@ -291,30 +256,77 @@ class Plugins:
         else:
             self.window.controller.plugins.set_by_tab(0)
 
-    def extract_option_tabs(self, options: dict) -> list:
-        """
-        Get keys for option tabs
-
-        :param options: plugin options
-        :return: list with keys
-        """
-        keys = []
-        is_default = False
-        for key in options:
-            option = options[key]
-            if 'tab' in option:
-                tab = option['tab']
-                if tab == "" or tab is None:
-                    is_default = True
-                if tab not in keys:
-                    keys.append(tab)
+    def build_option_tab_widget(self, plugin, content_tabs, scroll_tabs):
+        """Build independent child tabs underneath each top-level settings tab."""
+        # A tab without subtab retains the existing single-level layout.
+        tab_widget = QTabWidget()
+        top_tabs = {}
+        for key in content_tabs:
+            top, separator, sub = key.partition("::")
+            top_tabs.setdefault(top, []).append((key, sub if separator else None))
+        if "general" in top_tabs:
+            top_tabs = {"general": top_tabs.pop("general")} | top_tabs
+        for top, children in top_tabs.items():
+            has_subtabs = any(sub is not None for _, sub in children)
+            if has_subtabs:
+                children.sort(key=lambda child: 0 if child[1] in (None, "general", "runtime") else 1)
+                nested = QTabWidget()
+                for key, sub in children:
+                    widget = QWidget()
+                    widget.setLayout(content_tabs[key])
+                    scroll_tabs[key].setWidget(widget)
+                    sub = sub or "general"
+                    label = getattr(plugin, "subtabs", {}).get(sub)
+                    nested.addTab(scroll_tabs[key], label or self.option_tab_label(plugin, sub))
+                page = nested
             else:
-                is_default = True
+                key = children[0][0]
+                widget = QWidget()
+                widget.setLayout(content_tabs[key])
+                scroll_tabs[key].setWidget(widget)
+                page = scroll_tabs[key]
+            tab_widget.addTab(page, self.option_tab_label(plugin, top))
+        if tab_widget.count() == 1 and not any("::" in key for key in content_tabs):
+            # Keep the page owned and displayed by its tab widget. Removing it
+            # leaves it hidden and can delete it with the abandoned tab stack.
+            tab_widget.tabBar().hide()
+        return tab_widget
 
-        # add default general tab if not exists
-        if len(keys) == 0 or (is_default and "general" not in keys):
-            keys.append("general")
-        return keys
+    @staticmethod
+    def option_tab_key(option: dict, nested_tabs=None) -> str:
+        tab = option.get("tab") or "general"
+        subtab = option.get("subtab")
+        if subtab or tab in (nested_tabs or ()):
+            return f"{tab}::{subtab or 'general'}"
+        return tab
+
+    @staticmethod
+    def nested_option_tabs(options: dict) -> set:
+        return {option.get("tab") or "general" for option in options.values() if option.get("subtab")}
+
+    @staticmethod
+    def option_tab_label(plugin, tab_id: str) -> str:
+        if plugin.use_locale:
+            domain = plugin.get_locale_domain()
+            provider_domain = getattr(plugin, 'tab_locale_domains', {}).get(tab_id)
+            if provider_domain:
+                translated = trans('provider.name', False, provider_domain)
+                if translated != 'provider.name':
+                    return translated
+            key = f"tab.{tab_id}"
+            translated = trans(key, False, domain)
+            if translated != key:
+                return translated
+        if tab_id in plugin.tabs:
+            return plugin.tabs[tab_id]
+        key = f"plugin.tab.{tab_id}"
+        translated = trans(key)
+        return translated if translated != key else tab_id.replace("_", " ").capitalize()
+
+    def extract_option_tabs(self, options: dict) -> list:
+        """Collect distinct tab/subtab pages, preserving declaration order."""
+        nested = self.nested_option_tabs(options)
+        return list(dict.fromkeys(self.option_tab_key(option, nested) for option in options.values())) or ["general"]
 
     def build_widgets(self, plugin: BasePlugin, options: dict) -> dict:
         """
@@ -357,8 +369,16 @@ class Plugins:
                 apply(option)
                 widgets[key] = OptionCombo(self.window, parent, key, option)  # combobox
             elif t == 'cmd':
-                apply(option)
                 widgets[key] = OptionCmd(self.window, plugin, parent, key, option)  # command
+            elif t == 'button':
+                button = QPushButton()
+                button.setAutoDefault(False)
+                callback = option.get('callback')
+                if isinstance(callback, str):
+                    callback = getattr(plugin, callback, None)
+                if callable(callback):
+                    button.clicked.connect(lambda checked=False, cb=callback: cb())
+                widgets[key] = button
 
         return widgets
 
@@ -407,8 +427,8 @@ class Plugins:
         :param option: option dict
         :return: QVBoxLayout
         """
-        one_column_types = ('textarea', 'dict', 'bool', 'cmd')
-        no_label_types = ('bool', 'cmd')
+        one_column_types = ('textarea', 'dict', 'bool', 'cmd', 'button')
+        no_label_types = ('bool', 'cmd', 'button')
         no_desc_types = 'cmd'
         allow_locale = True
 
@@ -425,8 +445,9 @@ class Plugins:
             allow_locale = False
 
         # translate if localization is enabled
-        if plugin.use_locale and allow_locale:
-            domain = f"plugin.{plugin.id}"
+        if (plugin.use_locale or option.get('_use_locale', False)) and allow_locale:
+            plugin_domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else f"plugin.{plugin.id}"
+            domain = option.get('_locale_domain') or plugin_domain
             translated_label = trans(f"{key}.label", False, domain)
             translated_description = trans(f"{key}.description", False, domain)
             if translated_label != f"{key}.label":
@@ -440,6 +461,10 @@ class Plugins:
                 # txt_tooltip = txt_desc
 
         txt_desc = trans_placeholder_apply(txt_desc)
+
+        if option['type'] == 'button':
+            widget.setText(txt_title)
+            widget.setToolTip(txt_desc)
 
         """
         if option['type'] not in no_desc_types:
@@ -523,11 +548,17 @@ class Plugins:
         """
         model = self.window.ui.models[id]
         model.removeRows(0, model.rowCount())
-        i = 0
-        for n in data:
+
+        # Re-sort by the currently active locale, but store the stable plugin
+        # id in every row. Runtime language changes can change alphabetical
+        # order, so row numbers must never be used as plugin identifiers.
+        pm = self.window.core.plugins
+        plugin_ids = [pid for pid in pm.get_ids(sort=True) if pid in data]
+        for i, plugin_id in enumerate(plugin_ids):
             model.insertRow(i)
-            name = self.window.core.plugins.get_name(data[n].id)
-            tooltip = self.window.core.plugins.get_desc(data[n].id)
-            model.setData(model.index(i, 0), name)
-            model.setData(model.index(i, 0), tooltip, Qt.ToolTipRole)
-            i += 1
+            index = model.index(i, 0)
+            name = pm.get_name(plugin_id)
+            tooltip = pm.get_desc(plugin_id)
+            model.setData(index, name)
+            model.setData(index, tooltip, Qt.ToolTipRole)
+            model.setData(index, plugin_id, Qt.UserRole)

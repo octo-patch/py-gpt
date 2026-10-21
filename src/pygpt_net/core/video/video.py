@@ -88,8 +88,8 @@ class Video(QObject):
         self.window.update_status(msg)
 
         is_log = False
-        if self.window.core.config.has("log.dalle") \
-                and self.window.core.config.get("log.dalle"):
+        if self.window.core.config.has("log.image") \
+                and self.window.core.config.get("log.image"):
             is_log = True
         self.window.core.debug.info(msg, not is_log)
         if is_log:
@@ -253,7 +253,7 @@ class Video(QObject):
         """
         img_id = uuid.uuid4()
         dt_prefix = strftime("%Y%m%d_%H%M%S")
-        img_dir = self.window.core.config.get_user_dir("img")
+        img_dir = self.window.core.filesystem.get_runtime_dir("img", ctx=ctx)
         filename = f"{dt_prefix}_{img_id}.png"
         return os.path.join(img_dir, filename)
 

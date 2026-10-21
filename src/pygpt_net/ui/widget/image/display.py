@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.03 17:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 from PySide6.QtGui import QAction, QIcon
@@ -56,6 +56,11 @@ class ImageLabel(QLabel):
             lambda: self.action_open(event)
         )
 
+        actions['edit'] = QAction(QIcon(":/icons/brush.svg"), trans('action.edit'), self)
+        actions['edit'].triggered.connect(
+            lambda: self.action_edit(event)
+        )
+
         actions['open_dir'] = QAction(QIcon(":/icons/folder.svg"), trans('action.open_dir'), self)
         actions['open_dir'].triggered.connect(
             lambda: self.action_open_dir(event)
@@ -77,7 +82,7 @@ class ImageLabel(QLabel):
             self,
         )
         actions['use_attachment'].triggered.connect(
-            lambda: win.controller.files.use_attachment(self.path),
+            lambda: win.tools.get("files").chat.attach(self.path),
         )
         use_actions.append(actions['use_attachment'])
 
@@ -89,6 +94,7 @@ class ImageLabel(QLabel):
 
         menu = QMenu(self)
         menu.addAction(actions['open'])
+        menu.addAction(actions['edit'])
         menu.addAction(actions['open_dir'])
 
         # use by type
@@ -112,6 +118,15 @@ class ImageLabel(QLabel):
         """
         win = self._get_window()
         win.tools.get("viewer").open(self.path)
+
+    def action_edit(self, event):
+        """Open the original image in Painter and reveal its tab."""
+        win = self._get_window()
+        win.tools.get("painter").open(self.path)
+        if self.window is not win:
+            self.window.close()
+        win.raise_()
+        win.activateWindow()
 
     def action_open_dir(self, event):
         """

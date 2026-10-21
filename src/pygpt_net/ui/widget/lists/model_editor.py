@@ -11,7 +11,7 @@
 
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtCore import Qt, QItemSelectionModel
-from PySide6.QtWidgets import QMenu, QAbstractItemView
+from PySide6.QtWidgets import QMenu, QAbstractItemView, QApplication
 
 from pygpt_net.ui.widget.lists.base import BaseList
 from pygpt_net.utils import trans
@@ -184,14 +184,6 @@ class ModelEditorList(BaseList):
 
         :param event: context menu event
         """
-        actions = {}
-        actions['delete'] = QAction(QIcon(":/icons/delete.svg"), trans('action.delete'), self)
-        actions['duplicate'] = QAction(QIcon(":/icons/copy.svg"), trans('action.duplicate'), self)
-
-        menu = QMenu(self)
-        menu.addAction(actions['duplicate'])
-        menu.addAction(actions['delete'])
-
         index = self.indexAt(event.pos())
         idx = index.row() if index.isValid() else -1
 
@@ -209,7 +201,38 @@ class ModelEditorList(BaseList):
                 self._backup_selection = None
             return
 
+        target_rows = list(selected_rows) if multi else [idx]
+        target_models = []
+        for row in target_rows:
+            model_id = self.window.controller.model.editor.get_model_by_tab_idx(row)
+            if model_id is not None:
+                model = self.window.core.models.items.get(model_id)
+                if model is not None:
+                    target_models.append(model)
+        show_action = bool(target_models) and all(getattr(model, 'is_hidden', False) for model in target_models)
+
+        actions = {}
+        actions['visibility'] = QAction(
+            trans('action.show' if show_action else 'action.hide'),
+            self,
+        )
+        actions['delete'] = QAction(QIcon(":/icons/delete.svg"), trans('action.delete'), self)
+        actions['duplicate'] = QAction(QIcon(":/icons/copy.svg"), trans('action.duplicate'), self)
+
+        menu = QMenu(self)
+        copy = menu.addAction(QIcon(":/icons/copy.svg"), trans("action.copy"))
+        copy.triggered.connect(lambda: self.action_copy([idx] if index.isValid() else selected_rows))
+        menu.addSeparator()
+        menu.addAction(actions['visibility'])
+        menu.addSeparator()
+        menu.addAction(actions['duplicate'])
+        menu.addAction(actions['delete'])
+
         # Route actions: pass list on multi, int on single
+        target = list(selected_rows) if multi else idx
+        actions['visibility'].triggered.connect(
+            lambda: self.action_visibility(target, hidden=show_action is False)
+        )
         if multi:
             actions['duplicate'].triggered.connect(lambda: self.action_duplicate(list(selected_rows)))
             actions['delete'].triggered.connect(lambda: self.action_delete(list(selected_rows)))
@@ -233,6 +256,21 @@ class ModelEditorList(BaseList):
     # If 'item' is a list/tuple -> pass list of row ints to external code.
     # If 'item' is an int -> pass single row int to external code.
     # ----------------------------
+
+    def action_copy(self, rows):
+        ids = []
+        for row in rows:
+            key = self.window.controller.model.editor.get_model_by_tab_idx(row)
+            model = self.window.core.models.items.get(key)
+            if model is not None and model.id:
+                ids.append(model.id)
+        if ids:
+            QApplication.clipboard().setText("\n".join(ids))
+
+    def action_visibility(self, item, hidden: bool):
+        """Show or hide one or more models."""
+        self.restore_after_ctx_menu = False
+        self.window.controller.model.editor.set_hidden_by_idx(item, hidden)
 
     def action_delete(self, item):
         """

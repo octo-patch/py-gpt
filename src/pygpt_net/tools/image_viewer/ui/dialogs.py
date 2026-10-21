@@ -12,7 +12,6 @@
 from PySide6.QtCore import Qt, QPoint, QSize, QEvent
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
-    QMenuBar,
     QVBoxLayout,
     QHBoxLayout,
     QSizePolicy,
@@ -69,7 +68,7 @@ class DialogSpawner:
         row.addWidget(scroll)
 
         layout = QVBoxLayout()
-        # remove extra outer margins to bring the toolbar closer to the top/menu bar
+        # remove extra outer margins to bring the toolbar closer to the top
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
@@ -105,8 +104,6 @@ class ImageViewerDialog(BaseDialog):
         self.window = window
         self.id = id
         self.disable_geometry_store = False
-        self.menu_bar = None
-        self.file_menu = None
         self.actions = {}
         self.source = None
         self.pixmap = None
@@ -117,10 +114,8 @@ class ImageViewerDialog(BaseDialog):
         self._last_target_size = None
 
         # icons
-        self._icon_add = QIcon(":/icons/add.svg")
         self._icon_folder = QIcon(":/icons/folder.svg")
         self._icon_save = QIcon(":/icons/save.svg")
-        self._icon_logout = QIcon(":/icons/logout.svg")
 
         # toolbar icons
         self._icon_prev = QIcon(":/icons/back.svg")
@@ -129,7 +124,7 @@ class ImageViewerDialog(BaseDialog):
         self._icon_fullscreen = QIcon(":/icons/fullscreen.svg")
 
         # zoom / pan state
-        self._zoom_mode = 'fit'  # 'fit' or 'manual'
+        self._zoom_mode = 'fit'  # 'fit', 'width' or 'manual'
         self._zoom_factor = 1.0  # current manual factor (image space)
         self._fit_factor = 1.0   # computed on-the-fly for fit mode
         self._min_zoom = 0.05
@@ -163,7 +158,6 @@ class ImageViewerDialog(BaseDialog):
 
         :param layout: layout
         """
-        layout.setMenuBar(self.setup_menu())
         self.setLayout(layout)
 
     def resizeEvent(self, event):
@@ -185,8 +179,8 @@ class ImageViewerDialog(BaseDialog):
                 if self.pixmap is not None:
                     self.pixmap.setScaledContents(False)
 
+            target_size = self._viewport_size()
             if self._zoom_mode == 'fit':
-                target_size = self._viewport_size()
                 if key != self._last_src_key or target_size != self._last_target_size:
                     # scale to viewport while keeping aspect ratio, smooth transform
                     scaled = src.scaled(
@@ -200,50 +194,10 @@ class ImageViewerDialog(BaseDialog):
                     self._last_target_size = target_size
                     # update status bar to reflect new zoom and display size
                     self._refresh_statusbar()
+            elif self._zoom_mode == 'width':
+                if key != self._last_src_key or target_size != self._last_target_size:
+                    self._apply_width_fit(src, target_size)
         super(ImageViewerDialog, self).resizeEvent(event)
-
-    def setup_menu(self) -> QMenuBar:
-        """
-        Setup dialog menu
-
-        :return: QMenuBar
-        """
-        self.menu_bar = QMenuBar(self)
-        self.menu_bar.setNativeMenuBar(False)
-        self.file_menu = self.menu_bar.addMenu(trans("menu.file"))
-
-        self.actions["new"] = QAction(self._icon_add, trans("action.new"), self)
-        self.actions["new"].triggered.connect(
-            lambda checked=False: self.window.tools.get("viewer").new()
-        )
-
-        self.actions["open"] = QAction(self._icon_folder, trans("action.open"), self)
-        self.actions["open"].triggered.connect(
-            lambda checked=False: self.window.tools.get("viewer").open_file(self.id, auto_close=True)
-        )
-
-        self.actions["open_new"] = QAction(self._icon_folder, trans("action.open_new_window"), self)
-        self.actions["open_new"].triggered.connect(
-            lambda checked=False: self.window.tools.get("viewer").open_file(self.id, auto_close=False)
-        )
-
-        self.actions["save_as"] = QAction(self._icon_save, trans("action.save_as"), self)
-        self.actions["save_as"].triggered.connect(
-            lambda checked=False: self.window.tools.get("viewer").save_by_id(self.id)
-        )
-
-        self.actions["exit"] = QAction(self._icon_logout, trans("menu.file.exit"), self)
-        self.actions["exit"].triggered.connect(
-            lambda checked=False: self.window.tools.get("viewer").close_preview(self.id)
-        )
-
-        self.file_menu.addAction(self.actions["new"])
-        self.file_menu.addAction(self.actions["open"])
-        self.file_menu.addAction(self.actions["open_new"])
-        self.file_menu.addAction(self.actions["save_as"])
-        self.file_menu.addAction(self.actions["exit"])
-
-        return self.menu_bar
 
     def setup_toolbar(self) -> QFrame:
         """
@@ -496,12 +450,13 @@ class ImageViewerDialog(BaseDialog):
             if not self._has_image():
                 return False
 
-            # start manual zoom from current fit factor if needed
-            if self._zoom_mode == 'fit':
-                self._fit_factor = self._compute_fit_factor(
-                    self.source.pixmap().size(),
-                    self._viewport_size()
-                )
+            # start manual zoom from current automatic factor if needed
+            if self._zoom_mode in ('fit', 'width'):
+                if self._zoom_mode == 'fit':
+                    self._fit_factor = self._compute_fit_factor(
+                        self.source.pixmap().size(),
+                        self._viewport_size()
+                    )
                 self._zoom_factor = self._fit_factor
                 self._zoom_mode = 'manual'
                 self.scroll_area.setWidgetResizable(False)
@@ -567,7 +522,7 @@ class ImageViewerDialog(BaseDialog):
         """Allow dragging only when image does not fit into the viewport."""
         if not self._has_image():
             return False
-        if self._zoom_mode != 'manual':
+        if self._zoom_mode not in ('manual', 'width'):
             return False
         vp = self._viewport_size()
         return self.pixmap.width() > vp.width() or self.pixmap.height() > vp.height()
@@ -585,6 +540,73 @@ class ImageViewerDialog(BaseDialog):
         tw = max(1, target.width())
         th = max(1, target.height())
         return min(tw / float(iw), th / float(ih))
+
+    def fit_to_width(self):
+        """Fit image inside the viewport without upscaling above its native size."""
+        if not self._has_image():
+            return
+        self._zoom_mode = 'width'
+        self._drag_active = False
+        self._last_target_size = None
+        self._apply_width_fit(self.source.pixmap(), self._viewport_size())
+        if self.scroll_area is not None:
+            self.scroll_area.horizontalScrollBar().setValue(0)
+            self.scroll_area.verticalScrollBar().setValue(0)
+
+    def _apply_width_fit(self, src, target: QSize):
+        """Fit image inside the viewport, preserving aspect ratio and native-size cap."""
+        if src is None or src.isNull() or self.pixmap is None:
+            return
+
+        iw = max(1, src.width())
+        ih = max(1, src.height())
+        tw = max(1, target.width())
+        th = max(1, target.height())
+
+        # Constrain by both dimensions. This is especially important when a
+        # portrait image returns from the edge-maximized/fullscreen geometry:
+        # fitting only the width can leave the image taller than the dialog.
+        factor = min(1.0, tw / float(iw), th / float(ih))
+        new_w = max(1, int(round(iw * factor)))
+        new_h = max(1, int(round(ih * factor)))
+
+        if self.scroll_area is not None:
+            self.scroll_area.setWidgetResizable(False)
+        self.pixmap.setScaledContents(False)
+        scaled = src.scaled(
+            new_w,
+            new_h,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.pixmap.setPixmap(scaled)
+        self.pixmap.resize(scaled.size())
+
+        # Scrollbar visibility can change after the first resize, which changes
+        # the final viewport by a few pixels. Recalculate once against the actual
+        # viewport so the image is guaranteed to fit in both dimensions.
+        if self.scroll_area is not None:
+            actual = self.scroll_area.viewport().size()
+            actual_tw = max(1, actual.width())
+            actual_th = max(1, actual.height())
+            final_factor = min(1.0, actual_tw / float(iw), actual_th / float(ih))
+            if abs(final_factor - factor) > 1e-9:
+                factor = final_factor
+                new_w = max(1, int(round(iw * factor)))
+                new_h = max(1, int(round(ih * factor)))
+                scaled = src.scaled(
+                    new_w,
+                    new_h,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                self.pixmap.setPixmap(scaled)
+                self.pixmap.resize(scaled.size())
+
+        self._fit_factor = factor
+        self._last_src_key = src.cacheKey()
+        self._last_target_size = self._viewport_size()
+        self._refresh_statusbar()
 
     def _clamp_factor_by_size(self, factor: float) -> float:
         """
@@ -687,7 +709,7 @@ class ImageViewerDialog(BaseDialog):
         """
         Return current zoom in percent, based on mode.
         """
-        factor = self._fit_factor if self._zoom_mode == 'fit' else self._zoom_factor
+        factor = self._fit_factor if self._zoom_mode in ('fit', 'width') else self._zoom_factor
         try:
             return max(1, int(round(factor * 100.0)))
         except Exception:

@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.06 19:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 import hashlib
@@ -18,7 +18,7 @@ from PySide6 import QtGui, QtCore
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QFileDialog
 
-from pygpt_net.tools.base import BaseTool
+from pygpt_net.tools.base import BaseTool, ToolMenuAction
 from pygpt_net.tools.image_viewer.ui.dialogs import DialogSpawner
 from pygpt_net.ui.widget.dialog.base import BaseDialog
 from pygpt_net.utils import trans
@@ -33,6 +33,13 @@ class ImageViewer(BaseTool):
         """
         super(ImageViewer, self).__init__(*args, **kwargs)
         self.id = "viewer"
+        self.allow_tab = False
+        self.allow_dialog = True
+        self.multi_tab = True
+        self.multi_dialog = True
+        self.on_menu_click = ToolMenuAction.ALWAYS_DIALOG
+        self.dialog_types = ('image_viewer',)
+        self.dialog_opener = 'open_preview'
         self.width = 640
         self.height = 400
         self.instance_id = 0
@@ -101,6 +108,8 @@ class ImageViewer(BaseTool):
         :param reuse: reuse existing dialog id (in-place reload)
         """
         # determine dialog id
+        if not self.can_open_dialog():
+            return None
         if path:
             if reuse and current_id:
                 id = current_id
@@ -113,6 +122,8 @@ class ImageViewer(BaseTool):
             # new instance id
             id = 'image_viewer_' + str(self.instance_id)
             self.instance_id += 1
+
+        id = self.resolve_dialog_id(id)
 
         dialog_exists = id in self.window.ui.dialog
         if not dialog_exists:
@@ -291,7 +302,7 @@ class ImageViewer(BaseTool):
         :param path: path to image
         """
         if os.path.exists(path):
-            self.window.controller.files.open(path)
+            self.window.tools.get("files").paths.open(path)
 
     def open_dir(self, path: str):
         """
@@ -300,7 +311,7 @@ class ImageViewer(BaseTool):
         :param path: path to image
         """
         if os.path.exists(path):
-            self.window.controller.files.open_dir(
+            self.window.tools.get("files").paths.reveal(
                 path,
                 True,
             )
@@ -452,6 +463,7 @@ class ImageViewer(BaseTool):
                 if normal is not None:
                     dialog.setGeometry(normal)
                 dialog._edge_max = False
+                QtCore.QTimer.singleShot(0, dialog.fit_to_width)
                 return
 
             # store current geometry to allow restoring later
@@ -473,6 +485,7 @@ class ImageViewer(BaseTool):
             available = screen.availableGeometry()
             dialog.setGeometry(available)
             dialog._edge_max = True
+            QtCore.QTimer.singleShot(0, dialog.fit_to_width)
         except Exception as e:
             # fallback to native maximize if anything goes wrong
             try:
@@ -480,6 +493,7 @@ class ImageViewer(BaseTool):
                     dialog.showNormal()
                 else:
                     dialog.showMaximized()
+                QtCore.QTimer.singleShot(0, dialog.fit_to_width)
             except Exception:
                 # last resort: ignore
                 self.window.core.debug.log(e)
@@ -588,7 +602,7 @@ class ImageViewer(BaseTool):
             checkable=False,
         )
         actions["image.viewer"].triggered.connect(
-            lambda: self.open_preview()
+            self.on_menu_action
         )
         return actions
 
@@ -604,6 +618,8 @@ class ImageViewer(BaseTool):
         :param dialog_id: dialog instance ID
         :return dialog instance
         """
+        if not self.can_open_dialog():
+            return None
         if type_id == "image_viewer":
             return self.spawner.setup(dialog_id)
 

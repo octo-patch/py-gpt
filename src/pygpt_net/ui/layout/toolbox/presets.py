@@ -7,18 +7,18 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.26 13:30:00                  #
+# Updated Date: 2026.09.27 10:00:00                  #
 # ================================================== #
 
 from PySide6 import QtCore
 from PySide6.QtGui import QStandardItemModel, QStandardItem, Qt, QIcon
-from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QWidget, QSizePolicy
-
-from pygpt_net.core.types import (
-    MODE_AGENT,
-    MODE_EXPERT,
+from PySide6.QtWidgets import (
+    QAbstractItemView, QVBoxLayout, QHBoxLayout, QPushButton, QWidget, QSizePolicy,
+    QTabWidget, QTreeWidget, QTreeWidgetItem,
 )
-from pygpt_net.ui.widget.element.labels import HelpLabel, TitleLabel
+
+from pygpt_net.core.types import MODE_EXPERT
+from pygpt_net.ui.widget.element.labels import ElideTitleLabel, HelpLabel
 from pygpt_net.ui.widget.lists.preset import PresetList
 
 from pygpt_net.ui.layout.toolbox.footer import Footer
@@ -34,6 +34,9 @@ class Presets:
         self.window = window
         self.footer = Footer(window)
         self.id = 'preset.presets'
+        self._skills_refreshing = False
+        self._preset_signature = None
+        self._preset_model = None
 
     def setup(self) -> QWidget:
         """
@@ -42,12 +45,36 @@ class Presets:
         :return: QWidget
         """
         presets = self.setup_presets()
+        preset_page = QWidget()
+        preset_page.setLayout(presets)
+
+        skills_page = self.setup_skills()
+
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.tabBar().setObjectName('toolboxTabs')
+        tabs.tabBar().setDrawBase(False)
+        tabs.tabBar().setExpanding(False)
+        # Match the main tab row, including its 36 px corner controls.
+        tabs.tabBar().setMinimumHeight(42)
+        tabs.addTab(preset_page, trans("toolbox.agents.label"))
+        tabs.addTab(skills_page, trans("preset.tab.skills"))
+        # The extra Skills tab belongs to Chat with Agents only. Other modes
+        # keep the previous compact presets UI with no visible tab bar.
+        tabs.setTabVisible(1, False)
+        tabs.tabBar().setVisible(False)
+        self.window.ui.nodes['presets.tabs'] = tabs
+
+        outer = QVBoxLayout()
+        outer.addWidget(tabs, 1)
+        outer.setContentsMargins(0, 0, 0, 0)
 
         self.window.ui.nodes['presets.widget'] = QWidget()
-        self.window.ui.nodes['presets.widget'].setLayout(presets)
+        self.window.ui.nodes['presets.widget'].setLayout(outer)
         self.window.ui.nodes['presets.widget'].setMinimumHeight(180)
         self.window.ui.nodes['presets.widget'].setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        self.refresh_skills()
         return self.window.ui.nodes['presets.widget']
 
     def setup_presets(self) -> QVBoxLayout:
@@ -59,23 +86,28 @@ class Presets:
         nodes = self.window.ui.nodes
 
         nodes['preset.presets.new'] = QPushButton(QIcon(":/icons/add.svg"), "")
+        nodes['preset.presets.new'].setFlat(True)
+        nodes['preset.presets.new'].setStyleSheet('QPushButton { border: none; background: transparent; }')
+        nodes['preset.presets.new'].setToolTip(trans('toolbox.presets.add.tooltip'))
         nodes['preset.presets.new'].clicked.connect(
             lambda _=False: self.window.controller.presets.editor.edit()
         )
 
-        nodes['preset.presets.label'] = TitleLabel(trans("toolbox.presets.label"))
-        nodes['preset.agents.label'] = TitleLabel(trans("toolbox.agents.label"))
-        nodes['preset.experts.label'] = TitleLabel(trans("toolbox.experts.label"))
+        nodes['preset.presets.label'] = ElideTitleLabel(trans("toolbox.presets.label"))
+        nodes['preset.agents.label'] = ElideTitleLabel(trans("toolbox.agents.label"))
+        nodes['preset.experts.label'] = ElideTitleLabel(trans("toolbox.experts.label"))
         nodes['preset.presets.label'].setVisible(False)
         nodes['preset.agents.label'].setVisible(False)
         nodes['preset.experts.label'].setVisible(False)
 
-        header = QHBoxLayout()
+        header_widget = QWidget()
+        nodes['preset.header'] = header_widget
+        header = QHBoxLayout(header_widget)
         header.addWidget(nodes['preset.presets.label'])
         header.addWidget(nodes['preset.agents.label'])
         header.addWidget(nodes['preset.experts.label'])
         header.addWidget(nodes['preset.presets.new'], alignment=Qt.AlignRight)
-        header.setContentsMargins(5, 0, 0, 0)
+        header.setContentsMargins(5, 0, 5, 0)
 
         nodes[self.id] = PresetList(self.window, self.id)
         nodes[self.id].selection_locked = self.window.controller.presets.preset_change_locked
@@ -83,18 +115,88 @@ class Presets:
 
         nodes['tip.toolbox.presets'] = HelpLabel(trans('tip.toolbox.presets'), self.window)
         nodes['tip.toolbox.presets'].setAlignment(Qt.AlignCenter)
+        nodes['tip.toolbox.presets'].setContentsMargins(0, 0, 5, 0)
 
         layout = QVBoxLayout()
         layout.addStretch()
-        layout.addLayout(header)
+        layout.addWidget(header_widget)
         layout.addWidget(nodes[self.id], 1)
         layout.addWidget(nodes['tip.toolbox.presets'])
-        layout.setContentsMargins(2, 5, 5, 5)
+        layout.setContentsMargins(2, 5, 0, 5)
 
         self.window.ui.models[self.id] = self.create_model(self.window)
         nodes[self.id].setModel(self.window.ui.models[self.id])
 
         return layout
+
+
+    def setup_skills(self) -> QWidget:
+        """Build the global Agent Skills selector shown in the toolbox."""
+        tree = QTreeWidget()
+        tree.setColumnCount(1)
+        tree.setHeaderHidden(True)
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        tree.setUniformRowHeights(True)
+        tree.itemChanged.connect(self._on_skill_changed)
+        self.window.ui.nodes['toolbox.skills.list'] = tree
+
+        layout = QVBoxLayout()
+        layout.addWidget(tree, 1)
+        layout.setContentsMargins(2, 5, 2, 5)
+        page = QWidget()
+        page.setLayout(layout)
+        return page
+
+    def refresh_skills(self):
+        """Refresh toolbox skill checkboxes from the profile-wide registry."""
+        tree = self.window.ui.nodes.get('toolbox.skills.list')
+        if tree is None:
+            return
+        try:
+            skills = [skill for skill in self.window.core.skills.list_installed()
+                      if str(skill.get('name') or '').strip()]
+        except Exception:
+            # Keep the current rows when the registry is temporarily unavailable.
+            return
+        skill_ids = [str(skill['name']).strip() for skill in skills]
+        current_ids = [tree.topLevelItem(row).data(0, QtCore.Qt.UserRole)
+                       for row in range(tree.topLevelItemCount())]
+        self._skills_refreshing = True
+        try:
+            with QtCore.QSignalBlocker(tree):
+                # A checkbox's itemChanged handler synchronously reaches this
+                # refresh through Skills.set_enabled(). Clearing the tree there
+                # deletes the item still used by Qt's delegate/model event stack.
+                # State-only changes must preserve items (and scroll position).
+                if current_ids != skill_ids:
+                    tree.clear()
+                    for skill_id in skill_ids:
+                        item = QTreeWidgetItem(tree)
+                        item.setData(0, QtCore.Qt.UserRole, skill_id)
+                        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                for row, skill in enumerate(skills):
+                    item = tree.topLevelItem(row)
+                    item.setText(0, str(skill.get('display_name') or skill_ids[row]))
+                    item.setToolTip(0, str(skill.get('description') or '').strip())
+                    item.setCheckState(
+                        0,
+                        Qt.Checked if skill.get('enabled') else Qt.Unchecked,
+                    )
+        finally:
+            self._skills_refreshing = False
+
+    def _on_skill_changed(self, item: QTreeWidgetItem, column: int):
+        if self._skills_refreshing or column != 0:
+            return
+        skill_id = item.data(0, QtCore.Qt.UserRole)
+        if not skill_id:
+            return
+        self.window.controller.skills.on_toolbox_enabled_changed(
+            str(skill_id),
+            item.checkState(0) == Qt.Checked,
+        )
 
     def create_model(self, parent) -> QStandardItemModel:
         """
@@ -116,6 +218,15 @@ class Presets:
 
         view: PresetList = nodes[self.id]
         model = models.get(self.id)
+
+        signature = (mode, bool(self.window.core.config.get('presets.drag_and_drop.enabled')),
+                     tuple((key, item.name, str(item.prompt)[:80], len(str(item.prompt)) > 80, item.uuid,
+                            bool(item.enabled)) for key, item in (data or {}).items()))
+        if (model is not None and model is self._preset_model
+                and signature == self._preset_signature
+                and model.rowCount() == len(data or {})
+                and not getattr(view, '_selection_override_ids', None)):
+            return
 
         # If view requested selection override, do NOT override it by backup
         selection_override_ids = getattr(view, "_selection_override_ids", None)
@@ -149,8 +260,6 @@ class Presets:
 
             if data:
                 is_expert_mode = (mode == MODE_EXPERT)
-                is_agent_mode = (mode == MODE_AGENT)
-                count_experts = self.window.core.experts.count_experts if is_agent_mode else None
                 startswith_current = "current."
 
                 role_uuid = QtCore.Qt.UserRole + 1
@@ -163,10 +272,6 @@ class Presets:
                     name = item.name
                     if is_expert_mode and item.enabled and not key.startswith(startswith_current):
                         name = f"[x] {name}"
-                    elif is_agent_mode:
-                        num_experts = count_experts(key)
-                        if num_experts > 0:
-                            name = f"{name} ({num_experts} experts)"
 
                     prompt = str(item.prompt)
                     tooltip = prompt if len(prompt) <= 80 else f"{prompt[:80]}..."
@@ -207,3 +312,5 @@ class Presets:
         # Clear one-shot pending scroll values and re-enable user interaction
         view.clear_pending_scroll()
         view.end_model_update()
+        self._preset_signature = signature
+        self._preset_model = model

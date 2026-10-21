@@ -1,0 +1,244 @@
+/* Chat theme overrides. Base layout and runtime states live in ../chat.css. */
+
+/* Page and links */
+
+body {{
+  --copy-btn-bg-hover: rgb(0 0 0 / 82%);
+  color: #f4e9ff;
+  background-color: #100b1f;
+}}
+
+p {{
+  color: #f4e9ff;
+}}
+
+a {{
+  color: #39dfff !important;
+}}
+
+a:hover {{
+  color: #8af1ff !important;
+  text-decoration: none;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+a.chat-hover {{
+  color: #8af1ff !important;
+  text-decoration: none;
+}}
+
+/* Conversation links */
+
+.msg-box .msg a:not(.msg-copy-btn) {{
+  color: inherit !important;
+}}
+
+.msg-box .msg a:not(.msg-copy-btn):hover {{
+  color: #39dfff !important;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.msg-box .msg a:not(.msg-copy-btn).chat-hover {{
+  color: #39dfff !important;
+}}
+
+/* Extra/footer links keep the theme link palette. */
+.msg-box .msg .msg-extra a,
+.msg-box .msg .msg-tool-extra a {{
+  color: #39dfff !important;
+}}
+
+
+/* Scrollbars */
+
+::-webkit-scrollbar,
+::-webkit-scrollbar-corner {{
+  background: transparent;
+}}
+
+::-webkit-scrollbar-thumb {{
+  background: #2b1b3d;
+}}
+
+::-webkit-scrollbar-thumb:hover {{
+  background: #ff4fd8;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+::-webkit-scrollbar-thumb.chat-hover {{
+  background: #ff4fd8;
+}}
+
+/* Messages and authors */
+
+.msg-user {{
+  background: #21152f;
+  color: #f4e9ff;
+  border: 1px solid rgba(255, 79, 216, 0.08);
+}}
+
+.msg-user p,
+.msg-bot,
+.msg-bot p {{
+  color: #f4e9ff;
+}}
+
+.cmd {{
+  color: #806497 !important;
+}}
+
+.ts {{
+  color: #9a80b2;
+}}
+
+.name-bot::before {{
+  background-color: {QTMATERIAL_PRIMARYLIGHTCOLOR};
+}}
+
+.name-user::before {{
+  background-color: #ff4fd8;
+}}
+
+.msg-box .name-header.name-bot {{
+  color: #c7a7e8;
+}}
+
+.mention-anchor {{
+  color: #ff4fd8 !important;
+  background: rgba(255, 79, 216, 0.10);
+  border-radius: 4px;
+  padding: 1px 3px;
+  font-weight: 600;
+}}
+
+.msg-box.msg-user {{
+  margin-right: 10px;
+}}
+
+/* Code blocks and actions */
+
+code {{
+  color: {QTMATERIAL_PRIMARYLIGHTCOLOR};
+  background: #21142f;
+  padding: 6px;
+}}
+
+.code-wrapper ::-webkit-scrollbar {{
+  background: transparent;
+}}
+
+.code-header-wrapper {{
+  background-color: #21142f;
+}}
+
+.code-header-action {{
+  color: #b79bcf !important;
+}}
+
+.code-header-action:hover {{
+  color: #f4b7ff;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.code-header-action.chat-hover {{
+  color: #f4b7ff;
+}}
+
+.code-header-action:hover img {{
+  filter: brightness(130%);
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.code-header-action.chat-hover img {{
+  filter: brightness(130%);
+}}
+
+.code-header-lang {{
+  color: #806497;
+}}
+
+.code-wrapper .code-header-action.code-header-copy:hover,
+.code-wrapper .code-header-action.code-header-collapse:hover {{
+  transform: scale(1.06);
+  background: var(--copy-btn-bg-hover, rgb(0 0 0 / 82%));
+  border-color: rgba(255, 79, 216, 0.12);
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.code-wrapper .code-header-action.code-header-copy.chat-hover,
+.code-wrapper .code-header-action.code-header-collapse.chat-hover {{
+  transform: scale(1.06);
+  background: var(--copy-btn-bg-hover, rgb(0 0 0 / 82%));
+  border-color: rgba(255, 79, 216, 0.12);
+}}
+
+/* Message actions */
+
+.action-icons a:hover {{
+  filter: brightness(140%);
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.action-icons a.chat-hover {{
+  filter: brightness(140%);
+}}
+
+/* Tool output */
+
+.tool-output .content {{
+  color: #806497 !important;
+}}
+
+.tool-output .tool-output-toggle:hover {{
+  background: none;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.tool-output .tool-output-toggle.chat-hover {{
+  background: none;
+}}
+
+.tool-output .tool-output-toggle:hover .tool-output-label,
+.tool-output .tool-output-toggle:hover .tool-output-name {{
+  color: #fff;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.tool-output .tool-output-toggle.chat-hover .tool-output-label,
+.tool-output .tool-output-toggle.chat-hover .tool-output-name {{
+  color: #fff;
+}}
+
+.tool-output .tool-output-label {{
+  color: #9a80b2;
+}}
+
+.tool-output .tool-output-name {{
+  color: #9a80b2;
+}}
+
+/* Loaders and live output */
+
+.lds-ring {{
+  color: #ff4fd8;
+}}
+
+.append_live {{
+  color: #9a80b2;
+}}
+
+/* Tips */
+
+.tips p {{
+  color: #806497;
+}}
+
+/* Match Tool/Processed hover for expandable agent status headers. */
+.workflow-status-progress .progress-details > summary:hover > .agents-v2-status__text,
+.workflow-status-progress .progress-worker > summary:hover > span {{
+  color: #fff;
+  background: none;
+  animation: none;
+}}
+/* Event-driven hover fallback for Qt WebEngine. */
+.workflow-status-progress .progress-details > summary.chat-hover > .agents-v2-status__text,
+.workflow-status-progress .progress-worker > summary.chat-hover > span {{
+  color: #fff;
+  background: none;
+  animation: none;
+}}
+
+.user-message-actions {{ --user-actions-color: #a0a0a0; }}
+
+:root {{ --user-file-color: #f4e9ff; --user-file-border: rgba(255, 255, 255, 0.14); --user-file-bg: rgba(255, 255, 255, 0.025); --user-file-hover: rgba(255, 255, 255, 0.065); }}

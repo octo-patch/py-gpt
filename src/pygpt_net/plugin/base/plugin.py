@@ -6,21 +6,24 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.22 19:00:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
 
 import copy
 from typing import Optional, Any, Dict, List
+from contextlib import contextmanager
 
 from PySide6.QtCore import QObject, Slot
 
 from pygpt_net.core.bridge.context import BridgeContext
 from pygpt_net.core.events import Event, KernelEvent
+from pygpt_net.core.locale import LocaleDomain
+from pygpt_net.core.types.tools import PERSIST_HIDDEN_TOOL_CALLS, register_hidden_tool
 from pygpt_net.item.ctx import CtxItem
 from pygpt_net.utils import trans
 
 
-class BasePlugin(QObject):
+class BasePlugin(QObject, LocaleDomain):
     DEFAULT_OPTION = {
         "value": None,
         "label": "",
@@ -37,12 +40,15 @@ class BasePlugin(QObject):
         "persist": False,
         "urls": None,
         "use": None,
+        "tab": None,
+        "subtab": None,
     }
-    _ALLOW_OUTPUT_KEYS = ("request", "result", "context")
-    _IGNORE_EXTRA_KEYS = ("request", "context")
+    _ALLOW_OUTPUT_KEYS = ("request", "result", "context", "stdout", "stderr", "return_code")
+    _IGNORE_EXTRA_KEYS = ("request", "context", "model_result")
 
     def __init__(self, *args, **kwargs):
         super(BasePlugin, self).__init__()
+        self.init_locale_domain()
         self.window = kwargs.get('window', None)
         self.id = ""
         self.name = ""
@@ -53,11 +59,28 @@ class BasePlugin(QObject):
         self.options = {}
         self.initial_options = {}
         self.allowed_cmds = []
+        self.render = None
         self.tabs = {}
+        self.subtabs = {}
         self.parent = None
         self.enabled = False
         self.use_locale = False
+        self.is_common_plugin = False
         self.order = 0
+        self._option_locale_domain = None
+        self.tab_locale_domains = {}
+
+    def get_tool_render_rules(self) -> Dict[str, Any]:
+        """Return optional per-tool input/output presentation rules.
+
+        Plugins statically import Render and assign self.render = Render(self).
+        Each direction maps to {parser: callable, language: optional str}.
+        Parsers receive (value, tool_name, direction) and return text blocks
+        [{text, label, language}], or None to use RAW. A configured input
+        language also becomes the friendly header. Override to supply rules
+        directly or adjust them using the plugin's options.
+        """
+        return self.render.get_rules() if self.render is not None else {}
 
     def setup(self) -> Dict[str, Any]:
         """
@@ -66,6 +89,16 @@ class BasePlugin(QObject):
         :return: config options
         """
         return self.options
+
+    @contextmanager
+    def option_locale_domain(self, domain: Optional[str]):
+        """Temporarily assign a locale domain to options added by a child provider."""
+        previous = self._option_locale_domain
+        self._option_locale_domain = domain or None
+        try:
+            yield
+        finally:
+            self._option_locale_domain = previous
 
     def add_option(
             self,
@@ -77,11 +110,14 @@ class BasePlugin(QObject):
         Add plugin configuration option
 
         :param name: option name (ID, key)
-        :param type: option type (text, textarea, bool, int, float, dict, combo)
+        :param type: option type (text, textarea, bool, int, float, dict, combo, button)
         :param kwargs: additional keyword arguments for option properties
         :return: added option config dict
         """
         option = BasePlugin.DEFAULT_OPTION.copy()
+        if self._option_locale_domain and kwargs.get("locale", True):
+            kwargs.setdefault("_locale_domain", self._option_locale_domain)
+            kwargs.setdefault("_use_locale", True)
         option.update(kwargs)
         option['tooltip'] = option['tooltip'] or option['description']
         option["id"] = name
@@ -106,6 +142,8 @@ class BasePlugin(QObject):
             "params": {},
             "enabled": True,
         }
+        if kwargs.get("hidden") is True:
+            register_hidden_tool(cmd)
         if "instruction" in kwargs and isinstance(kwargs.get("instruction"), str):
             cmd_syntax["instruction"] = kwargs.get("instruction")
             kwargs.pop("instruction")
@@ -119,17 +157,6 @@ class BasePlugin(QObject):
         name = f"cmd.{cmd}"
         kwargs["cmd"] = cmd
         kwargs["value"] = cmd_syntax
-
-        kwargs["params_keys"] = {
-            "name": "text",
-            "type": {
-                "type": "combo",
-                "use": "var_types",
-                "keys": {},
-            },
-            "description": "text",
-            "required": "bool",
-        }
 
         return self.add_option(name, "cmd", **kwargs)
 
@@ -180,6 +207,8 @@ class BasePlugin(QObject):
         if opt:
             data = copy.deepcopy(opt["value"])
             data = {"cmd": cmd, **data}
+            if opt.get("hidden") is True:
+                data["hidden"] = True
             return data
         return None
 
@@ -304,6 +333,18 @@ class BasePlugin(QObject):
         """
         return
 
+    def shutdown(self, enabled: Optional[bool] = None):
+        """
+        Called during application shutdown.
+
+        This hook is invoked for every registered plugin, including disabled
+        plugins. ``enabled`` reports whether the plugin is active at the time
+        the application begins shutting down.
+
+        :param enabled: current plugin enabled state, or None if unavailable
+        """
+        return
+
     def trans(
             self,
             text: Optional[str] = None
@@ -316,7 +357,7 @@ class BasePlugin(QObject):
         """
         if text is None:
             return ""
-        domain = f'plugin.{self.id}'
+        domain = self.get_locale_domain() or f'plugin.{self.id}'
         return trans(text, False, domain)
 
     def error(self, err: Any):
@@ -326,6 +367,11 @@ class BasePlugin(QObject):
         :param err: error message
         """
         self.window.core.debug.log(err)
+        from pygpt_net.core.security import SecurityError
+        if isinstance(err, SecurityError):
+            # Expected policy denials are already returned in tool results.
+            # Keep them in the log without interrupting the user with a dialog.
+            return
         msg = self.window.core.debug.parse_alert(err)
         self.window.ui.dialogs.alert(f"{self.name}: {msg}")
 
@@ -473,17 +519,45 @@ class BasePlugin(QObject):
         :param ctx: context (CtxItem)
         :return: response dict
         """
+        result = response.get("result")
+        execution = isinstance(result, dict) and ("stdout" in result or "stderr" in result)
         clean_response = {k: v for k, v in response.items() if k in self._ALLOW_OUTPUT_KEYS or k.startswith("agent_")}
+        if execution:
+            clean_response.pop("context", None)
+            clean_response["result"] = {k: v for k, v in result.items() if k != "context"}
+        if "model_result" in response:
+            clean_response["result"] = response["model_result"]
         ctx.results.append(clean_response)
         ctx.reply = True
 
         extras = {k: v for k, v in response.items() if k not in self._IGNORE_EXTRA_KEYS}
+        if execution or "model_result" in response:
+            extras["result"] = clean_response["result"]
+        # Runtime attachments are transport metadata for the immediate next model
+        # request. Do not persist local paths inside the durable tool transcript.
+        extras.pop("agent_runtime_attachments", None)
+        request = response.get("request") if isinstance(response, dict) else None
+        tool_name = ""
+        if isinstance(request, dict) and request.get("cmd"):
+            # Keep the originating command name next to the result so native
+            # providers can map parallel function outputs to the correct call_id.
+            tool_name = str(request["cmd"])
+            extras.setdefault("cmd", tool_name)
 
-        if not isinstance(ctx.extra, dict):
-            ctx.extra = {}
-        if "tool_output" not in ctx.extra:
-            ctx.extra["tool_output"] = []
-        ctx.extra["tool_output"].append(extras)
+        persist_tool_output = bool(
+            PERSIST_HIDDEN_TOOL_CALLS
+            or not tool_name
+            or not self.window.core.command.is_tool_hidden(tool_name)
+        )
+        if persist_tool_output:
+            if not isinstance(ctx.extra, dict):
+                ctx.extra = {}
+            if "tool_output" not in ctx.extra:
+                ctx.extra["tool_output"] = []
+            ctx.extra["tool_output"].append(extras)
+
+        if execution:
+            return response
 
         if "context" in response:
             cfg = self.window.core.config

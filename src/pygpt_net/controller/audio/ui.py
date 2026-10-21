@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.27 07:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 from pygpt_net.utils import trans
@@ -21,8 +21,11 @@ class UI:
         """
         self.window = window
         self.recording = False
+        self._recording_notepad = None
+        self._input_target_selected = False
 
         self._input_bar = None
+        self._input_record_bar = None
         self._input_btn = None
         self._input_control_bar = None
         self._input_control_btn = None
@@ -41,6 +44,19 @@ class UI:
             return None
         self._input_bar = self.window.ui.plugin_addon['audio.input.btn'].bar
         return self._input_bar
+
+    def get_input_record_bar(self):
+        """
+        Get dedicated input recording status bar widget.
+
+        :return: input recording widget
+        """
+        if self._input_record_bar is not None:
+            return self._input_record_bar
+        if "audio.input.bar" not in self.window.ui.plugin_addon:
+            return None
+        self._input_record_bar = self.window.ui.plugin_addon['audio.input.bar']
+        return self._input_record_bar
 
     def get_input_control_bar(self):
         """
@@ -107,6 +123,63 @@ class UI:
         self._output_btn = self.window.ui.plugin_addon['audio.output']
         return self._output_btn
 
+
+    def _notepad_widgets(self):
+        """Return live Notepad widgets that expose the dedicated mic control."""
+        widgets = self.window.tools.get("notepad").documents.widgets
+        return [widget for widget in widgets.values() if widget is not None]
+
+    def _select_input_target(self, notepad=None):
+        if notepad is None:
+            tab = self.window.controller.tabs.get_current_tab()
+            if tab is not None and tab.tool_id == 'notepad':
+                notepad = self.window.tools.get('notepad').documents.widgets.get(tab.data_id)
+        self._recording_notepad = notepad
+        self._input_target_selected = True
+
+    def _recording_notepad_widgets(self):
+        # The owning tab may have closed while asynchronous capture was starting.
+        return [widget for widget in self._notepad_widgets() if widget is self._recording_notepad]
+
+    def is_recording_in(self, widget):
+        return self.recording and any(target is widget for target in self._recording_notepad_widgets())
+
+    def _clear_input_target(self):
+        self._recording_notepad = None
+        self._input_target_selected = False
+
+    def _set_notepad_mic_visible(self, visible: bool):
+        for widget in self._notepad_widgets():
+            if hasattr(widget, 'set_mic_visible'):
+                widget.set_mic_visible(visible)
+            if not visible and hasattr(widget, 'reset_recording_ui'):
+                widget.reset_recording_ui()
+
+    def _set_notepad_mic_state(self, active: bool):
+        for widget in self._notepad_widgets():
+            if hasattr(widget, 'set_mic_state'):
+                widget.set_mic_state(active and widget is self._recording_notepad)
+
+    def _set_notepad_record_pending(self):
+        for widget in self._recording_notepad_widgets():
+            if hasattr(widget, 'set_record_pending'):
+                widget.set_record_pending()
+
+    def _set_notepad_recording_active(self):
+        for widget in self._recording_notepad_widgets():
+            if hasattr(widget, 'set_recording_active'):
+                widget.set_recording_active()
+
+    def _set_notepad_record_level(self, value: int):
+        for widget in self._recording_notepad_widgets():
+            if hasattr(widget, 'set_record_level'):
+                widget.set_record_level(value)
+
+    def _reset_notepad_recording_ui(self):
+        for widget in self._notepad_widgets():
+            if hasattr(widget, 'reset_recording_ui'):
+                widget.reset_recording_ui()
+
     # --- Input events ---
 
     def on_input_volume_change(self, value: int, mode: str = 'input'):
@@ -116,9 +189,21 @@ class UI:
         :param value: slider value
         :param mode: 'input' or 'control' mode
         """
-        bar = self.get_output_bar()
+        if mode == 'control':
+            bar = self.get_input_control_bar()
+            if bar:
+                bar.setLevel(value)
+            return
+
+        bar = self.get_input_bar()
         if bar:
             bar.setLevel(value)
+
+        status = self.get_input_record_bar()
+        if status:
+            status.setLevel(value)
+
+        self._set_notepad_record_level(value)
 
     def on_input_device_change(self, index: int):
         """
@@ -136,6 +221,11 @@ class UI:
         """
         self.window.ui.nodes['input'].set_icon_visible("mic", True)
         if mode == "input":
+            self._set_notepad_mic_visible(True)
+            status = self.get_input_record_bar()
+            if status:
+                status.reset()
+            self._reset_notepad_recording_ui()
             return
         btn = self.get_input_btn() if mode == 'input' else self.get_input_control_btn()
         if btn:
@@ -149,6 +239,11 @@ class UI:
         """
         self.window.ui.nodes['input'].set_icon_visible("mic", False)
         if mode == "input":
+            self._set_notepad_mic_visible(False)
+            status = self.get_input_record_bar()
+            if status:
+                status.reset()
+            self._reset_notepad_recording_ui()
             return
         btn = self.get_input_btn() if mode == 'input' else self.get_input_control_btn()
         if btn:
@@ -181,8 +276,16 @@ class UI:
 
         :param mode: 'input' or 'control' mode
         """
+        if mode == "input" and not self._input_target_selected:
+            self._select_input_target()
         self.recording = True
         self.window.ui.nodes['input'].set_icon_state("mic", True)
+        if mode == "input":
+            self._set_notepad_mic_state(True)
+            self._set_notepad_recording_active()
+            status = self.get_input_record_bar()
+            if status:
+                status.show_recording()
         if mode in ["input", "realtime"]:
             self.window.controller.chat.common.lock_input()
             return
@@ -198,6 +301,13 @@ class UI:
         """
         self.recording = False
         self.window.ui.nodes['input'].set_icon_state("mic", False)
+        if mode == "input":
+            self._set_notepad_mic_state(False)
+            self._reset_notepad_recording_ui()
+            self._clear_input_target()
+            status = self.get_input_record_bar()
+            if status:
+                status.reset()
         if mode in ["input", "realtime"]:
             self.window.controller.chat.common.unlock_input()
             return
@@ -209,7 +319,31 @@ class UI:
         """
         Input cancel button click event
         """
-        pass
+        status = self.get_input_record_bar()
+        if status:
+            status.abort()
+        self._reset_notepad_recording_ui()
+        self._clear_input_target()
+
+    def on_input_toggle_requested(self, mode: str = 'input', notepad=None):
+        """Show the compact pending indicator immediately after the mic click."""
+        if mode != 'input':
+            return
+        self._select_input_target(notepad)
+        status = self.get_input_record_bar()
+        if status:
+            status.show_pending()
+        self._set_notepad_record_pending()
+
+    def on_input_abort(self, mode: str = 'input'):
+        """Hide the compact pending/recording indicator after a failed start."""
+        if mode != 'input':
+            return
+        status = self.get_input_record_bar()
+        if status:
+            status.abort()
+        self._reset_notepad_recording_ui()
+        self._clear_input_target()
 
     # --- Output events ---
 

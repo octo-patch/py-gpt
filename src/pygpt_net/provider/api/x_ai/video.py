@@ -19,11 +19,13 @@ from typing import Optional, Dict, Any, List
 import requests
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
 
+from pygpt_net.core.qt import safe_emit
 from pygpt_net.core.events import KernelEvent
 from pygpt_net.core.bridge.context import BridgeContext
 from pygpt_net.item.ctx import CtxItem
 from pygpt_net.utils import trans
 
+DEFAULT_GROK_VIDEO_MODEL="grok-imagine-video-1.5"
 
 class Video:
     """
@@ -79,7 +81,7 @@ class Video:
         worker.window = self.window
         worker.ctx = ctx
         worker.client = self.window.core.api.xai.get_client()  # configured xAI client
-        worker.model = (model.id if model and getattr(model, "id", None) else "grok-imagine-video")
+        worker.model = (model.id if model and getattr(model, "id", None) else DEFAULT_GROK_VIDEO_MODEL)
         worker.input_prompt = prompt
         worker.model_prompt = prompt_model
         worker.system_prompt = self.window.core.prompt.get('video')
@@ -138,7 +140,7 @@ class VideoWorker(QRunnable):
         self.ctx: Optional[CtxItem] = None
 
         # params
-        self.model = "grok-imagine-video"
+        self.model = DEFAULT_GROK_VIDEO_MODEL
         self.model_prompt = None
         self.input_prompt = ""
         self.system_prompt = ""
@@ -166,13 +168,12 @@ class VideoWorker(QRunnable):
             # optional prompt enhancement
             if not self.raw and not self.inline and self.input_prompt:
                 try:
-                    self.signals.status.emit(trans('vid.status.prompt.wait'))
+                    safe_emit(self.signals, "status", trans('vid.status.prompt.wait'))
                     bridge_context = BridgeContext(
                         prompt=self.input_prompt,
                         system_prompt=self.system_prompt,
                         model=self.model_prompt,
                         max_tokens=200,
-                        temperature=1.0,
                     )
                     ev = KernelEvent(KernelEvent.CALL, {'context': bridge_context, 'extra': {}})
                     self.window.dispatch(ev)
@@ -180,8 +181,8 @@ class VideoWorker(QRunnable):
                     if resp:
                         self.input_prompt = resp
                 except Exception as e:
-                    self.signals.error.emit(e)
-                    self.signals.status.emit(trans('vid.status.prompt.error') + ": " + str(e))
+                    safe_emit(self.signals, "error", e)
+                    safe_emit(self.signals, "status", trans('vid.status.prompt.error') + ": " + str(e))
 
             # Negative prompt merge (provider has no dedicated field)
             if self.extra_prompt and str(self.extra_prompt).strip():
@@ -195,7 +196,7 @@ class VideoWorker(QRunnable):
             video_url = self._resolve_video_url()  # may come from explicit video_url or video_id
             if video_url and not (str(video_url).startswith("http://") or str(video_url).startswith("https://")):
                 # xAI edit requires a publicly accessible video_url; local paths are unsupported
-                self.signals.status.emit("xAI video edit requires a publicly accessible video_url; provided identifier is not a URL. Skipping edit path.")
+                safe_emit(self.signals, "status", "xAI video edit requires a publicly accessible video_url; provided identifier is not a URL. Skipping edit path.")
                 video_url = None
 
             # normalize controls
@@ -211,7 +212,7 @@ class VideoWorker(QRunnable):
                 label += " (image-to-video)"
             else:
                 label += " (text-to-video)"
-            self.signals.status.emit(label + f": {self.input_prompt}...")
+            safe_emit(self.signals, "status", label + f": {self.input_prompt}...")
 
             # sequential jobs (API returns single URL per call)
             paths: List[str] = []
@@ -222,7 +223,7 @@ class VideoWorker(QRunnable):
                 # Build kwargs: omit duration for edits per docs
                 gen_kwargs: Dict[str, Any] = {
                     "prompt": self.input_prompt or "",
-                    "model": self.model or "grok-imagine-video",
+                    "model": self.model or DEFAULT_GROK_VIDEO_MODEL,
                     "aspect_ratio": aspect_ratio,
                     "resolution": resolution,
                 }
@@ -251,12 +252,12 @@ class VideoWorker(QRunnable):
                     time.sleep(0.2)
 
             if self.inline:
-                self.signals.finished_inline.emit(self.ctx, paths, self.input_prompt)
+                safe_emit(self.signals, "finished_inline", self.ctx, paths, self.input_prompt)
             else:
-                self.signals.finished.emit(self.ctx, paths, self.input_prompt)
+                safe_emit(self.signals, "finished", self.ctx, paths, self.input_prompt)
 
         except Exception as e:
-            self.signals.error.emit(e)
+            safe_emit(self.signals, "error", e)
         finally:
             self._cleanup()
 
@@ -370,7 +371,7 @@ class VideoWorker(QRunnable):
             str(idx + 1) + ".mp4"
         )
         path = os.path.join(self.window.core.config.get_user_dir("video"), name)
-        self.signals.status.emit(trans('vid.status.downloading') + f" ({idx + 1}) -> {path}")
+        safe_emit(self.signals, "status", trans('vid.status.downloading') + f" ({idx + 1}) -> {path}")
 
         try:
             with requests.get(url, stream=True, timeout=180) as r:
@@ -398,7 +399,7 @@ class VideoWorker(QRunnable):
             if not isinstance(self.ctx.extra, dict):
                 self.ctx.extra = {}
             # keep unified key 'video_id' across providers; value is the public URL returned by xAI
-            self.ctx.extra["video_id"] = self.window.core.filesystem.make_local(url)
+            self.ctx.extra["video_id"] = self.window.core.filesystem.make_local(url, ctx=self.ctx)
             self.window.core.ctx.update_item(self.ctx)
         except Exception:
             pass

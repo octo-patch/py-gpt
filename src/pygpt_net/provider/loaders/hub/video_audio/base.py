@@ -14,6 +14,8 @@ from fsspec import AbstractFileSystem
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import Document
 
+from pygpt_net.core.typing_compat import ensure_typing_self_compat
+
 class VideoAudioReader(BaseReader):
     """Video audio parser.
 
@@ -47,6 +49,7 @@ class VideoAudioReader(BaseReader):
     def _initialize(self) -> None:
         """Initialize parser."""
         try:
+            ensure_typing_self_compat()
             import whisper
         except ImportError:
             raise ImportError(
@@ -84,6 +87,7 @@ class VideoAudioReader(BaseReader):
         :param file: file path
         :return: transcript text
         """
+        ensure_typing_self_compat()
         import whisper
 
         model = cast(whisper.Whisper, self.parser_config["model"])

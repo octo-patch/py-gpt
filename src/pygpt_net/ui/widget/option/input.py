@@ -6,11 +6,13 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.26 12:00:00                  #
+# Updated Date: 2026.09.12 11:45:00                  #
 # ================================================== #
 
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QLineEdit, QFileDialog
+
+from pygpt_net.utils import trans
 
 
 class OptionInputInline(QLineEdit):
@@ -105,7 +107,7 @@ class OptionInput(QLineEdit):
             if "read_only" in self.option and self.option["read_only"]:
                 self.setReadOnly(True)
             if "placeholder" in self.option and self.option["placeholder"]:
-                self.setPlaceholderText(self.option["placeholder"])
+                self.setPlaceholderText(trans(self.option["placeholder"], domain=self.option.get('_locale_domain')) if self.option.get('_use_locale', True) else str(self.option["placeholder"]))
 
         # on update hook
         self.textChanged.connect(
@@ -118,6 +120,15 @@ class OptionInput(QLineEdit):
                 only_hook=True,
             )
         )
+
+    def update_locale(self):
+        """Refresh an optional translated placeholder."""
+        if not self.option or not self.option.get("placeholder"):
+            return
+        placeholder = self.option["placeholder"]
+        if self.option.get('_use_locale', True):
+            placeholder = trans(placeholder, domain=self.option.get('_locale_domain'))
+        self.setPlaceholderText(str(placeholder))
 
     def keyPressEvent(self, event):
         """

@@ -401,6 +401,7 @@ class Worker(BaseWorker):
 
     def _read_local_bytes(self, local_path: str) -> bytes:
         local = self.prepare_path(local_path)
+        self.security_read(local)
         if not os.path.exists(local):
             raise RuntimeError(f"Local file not found: {local}")
         with open(local, "rb") as fh:
@@ -560,10 +561,10 @@ class Worker(BaseWorker):
 
     def prepare_path(self, path: str) -> str:
         if path in [".", "./"]:
-            return self.plugin.window.core.config.get_user_dir("data")
+            return self.get_workdir()
         if self.is_absolute_path(path):
             return path
-        return os.path.join(self.plugin.window.core.config.get_user_dir("data"), path)
+        return os.path.join(self.get_workdir(), path)
 
     def is_absolute_path(self, path: str) -> bool:
         return os.path.isabs(path)

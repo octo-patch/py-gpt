@@ -6,12 +6,13 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.21 07:00:00                  #
+# Updated Date: 2026.09.15 16:50:00                  #
 # ================================================== #
 
 import os
 import re
 from typing import Optional, List, Dict
+from pygpt_net.item.render_attachment import attachment_paths
 
 from llama_index.core.schema import ImageDocument
 from llama_index.core.llms import (
@@ -66,7 +67,7 @@ class Context:
         model_id = self.window.core.models.get_id(model)
         mode = self.window.core.config.get('mode')
 
-        used_tokens = self.window.core.tokens.from_user(input_prompt, system_prompt)  # threshold and extra included
+        used_tokens = self.window.core.tokens.from_user(system_prompt, input_prompt)  # threshold and extra included
         max_tokens = self.window.core.config.get('max_total_tokens')
         model_ctx = self.window.core.models.get_num_ctx(model_id)
 
@@ -98,13 +99,34 @@ class Context:
                     messages.append(msg)
 
                 # ---- if tool output ----
-                is_last_item = item == items[-1] if items else False
+                is_last_item = item is items[-1] if items else False
                 if (is_last_item
                         and prev_message
                         and allow_native_tool_calls
                         and item.extra
                         and isinstance(item.extra, dict)):
                     if "tool_calls" in item.extra and isinstance(item.extra["tool_calls"], list):
+                        # A native tool-call response may contain no assistant text at all
+                        # (Ollama/Gemma commonly returns only ``tool_calls``). In that case
+                        # ``item.final_output`` is empty, so no assistant message was appended
+                        # above. The follow-up must still contain the exact provider message:
+                        #
+                        #   user -> assistant(tool_calls) -> tool(result)
+                        #
+                        # Insert/replace it once per tool round, before the first tool result.
+                        prev_tool_message_inserted = False
+
+                        def ensure_prev_tool_message():
+                            nonlocal prev_tool_message_inserted
+                            if prev_tool_message_inserted:
+                                return
+                            last_msg = messages[-1] if messages else None
+                            if last_msg and last_msg.role == MessageRole.ASSISTANT:
+                                messages[-1] = prev_message
+                            else:
+                                messages.append(prev_message)
+                            prev_tool_message_inserted = True
+
                         for tool_call in item.extra["tool_calls"]:
                             if "function" in tool_call:
                                 if "id" not in tool_call or "name" not in tool_call["function"]:
@@ -114,12 +136,7 @@ class Context:
                                         for tool_output in item.extra["tool_output"]:
                                             if ("cmd" in tool_output
                                                     and tool_output["cmd"] == tool_call["function"]["name"]):
-                                                last_msg = messages[-1] if messages else None
-                                                if last_msg and last_msg.role == "assistant":
-                                                    if prev_message:
-                                                        last_msg = prev_message  # prev message with tool calls
-                                                        messages[-1] = last_msg
-
+                                                ensure_prev_tool_message()
                                                 msg = ChatMessage(
                                                     role=MessageRole.TOOL,
                                                     content=str(tool_output),
@@ -129,12 +146,7 @@ class Context:
                                                 break
                                             elif "result" in tool_output:
                                                 # if result is present, append it as function call output
-                                                last_msg = messages[-1] if messages else None
-                                                if last_msg and last_msg.role == "assistant":
-                                                    if prev_message:
-                                                        last_msg = prev_message  # prev message with tool calls
-                                                        messages[-1] = last_msg
-
+                                                ensure_prev_tool_message()
                                                 msg = ChatMessage(
                                                     role=MessageRole.TOOL,
                                                     content=str(tool_output["result"]),
@@ -149,12 +161,14 @@ class Context:
     def add_user(
             self,
             query: str,
-            attachments: Dict[str, AttachmentItem] = None) -> ChatMessage:
+            attachments: Dict[str, AttachmentItem] = None,
+            allow_images: bool = True) -> ChatMessage:
         """
         Add user message
 
         :param query: input query
         :param attachments: attachments
+        :param allow_images: whether image URLs/attachments can be sent to the model
         :return: ChatMessage object
         """
         blocks = [TextBlock(text=query)]
@@ -162,8 +176,8 @@ class Context:
         self.attachments = {}  # reset attachments, only current prompt
         self.urls = []
 
-        # extract URLs from prompt
-        urls = self.extract_urls(query)
+        # extract image URLs from prompt only for image-capable models
+        urls = self.extract_urls(query) if allow_images else []
         if len(urls) > 0:
             for url in urls:
                 blocks.append(
@@ -171,8 +185,8 @@ class Context:
                 )
                 self.urls.append(url)
 
-        # if attachments are provided, add them to blocks
-        if attachments is not None and len(attachments) > 0:
+        # if attachments are provided, add image blocks only for image-capable models
+        if allow_images and attachments is not None and len(attachments) > 0:
             for id in attachments:
                 attachment = attachments[id]
                 if os.path.exists(attachment.path):
@@ -185,6 +199,53 @@ class Context:
         return ChatMessage(
             role=MessageRole.USER,
             blocks=blocks,
+        )
+
+    def add_runtime_images(
+            self,
+            attachments: Dict[str, AttachmentItem] = None,
+    ) -> Optional[ChatMessage]:
+        """Build an ephemeral user multimodal message for images returned by a tool.
+
+        Native function/tool result payloads are text-only for a number of
+        LlamaIndex provider adapters. ``fs_attach_runtime_file`` therefore carries
+        its local image separately in ``BridgeContext.attachments``. Promote
+        those transport-only images into a normal user multimodal message for
+        the immediate continuation, mirroring the Agents v2 main-agent path.
+
+        Runtime images deliberately do not touch ``self.attachments`` so
+        ``append_images()`` cannot persist them as normal chat attachments.
+
+        :param attachments: ephemeral runtime attachments from the tool reply
+        :return: ChatMessage when at least one valid runtime image exists
+        """
+        blocks = []
+        for attachment in (attachments or {}).values():
+            extra = getattr(attachment, "extra", None)
+            path = str(getattr(attachment, "path", "") or "")
+            if not (
+                    isinstance(extra, dict)
+                    and extra.get("runtime_tool_attachment") is True
+                    and path
+                    and os.path.isfile(path)
+                    and is_image(path)
+            ):
+                continue
+            blocks.append(ImageBlock(path=path))
+
+        if not blocks:
+            return None
+
+        return ChatMessage(
+            role=MessageRole.USER,
+            blocks=[
+                TextBlock(text=(
+                    "Runtime image attachment(s) from the preceding tool call are provided below. "
+                    "Inspect and use their visual content now to continue the current user task. "
+                    "Do not merely acknowledge that the image was attached."
+                )),
+                *blocks,
+            ],
         )
 
         """
@@ -227,9 +288,9 @@ class Context:
 
         # store sent images in ctx
         if len(images) > 0:
-            ctx.images = self.window.core.filesystem.make_local_list(list(images.values()))
+            ctx.images = attachment_paths(self.window.core.filesystem.make_local_list(list(images.values()), ctx=ctx), 'user')
         if len(urls) > 0:
-            ctx.images = urls
+            ctx.images = attachment_paths(urls, 'user')
             ctx.urls = urls
 
     def extract_urls(self, text: str) -> List[str]:

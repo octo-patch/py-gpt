@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.17 05:00:00                  #
+# Updated Date: 2026.09.08 14:20:00                  #
 # ================================================== #
 
 import json
@@ -22,20 +22,12 @@ from pygpt_net.core.types import (
 )
 
 from pygpt_net.item.model import ModelItem
+from pygpt_net.provider.core.model.compat import supports_future_computer_mode
 from pygpt_net.item.preset import PresetItem
 from pygpt_net.utils import trans
 
 
 class RemoteTools:
-
-    REMOTE_TOOLS = [
-        "web_search",
-        "image",
-        "code_interpreter",
-        "mcp",
-        "file_search",
-        "computer_use",
-    ]
 
     def __init__(self, window=None):
         """
@@ -51,10 +43,18 @@ class RemoteTools:
 
         :return: List of remote tools
         """
+        provider = self.window.core.llm.get("openai") if self.window is not None else None
+        if provider is None:
+            # Preset widgets request choices before the launcher registers
+            # LLMs. Read the built-in provider's metadata during bootstrap;
+            # resolve the registered provider afresh on subsequent calls.
+            from pygpt_net.provider.llms.openai.provider import OpenAILLM
+            provider = OpenAILLM()
         choices = []
-        for tool in self.REMOTE_TOOLS:
+        for tool, field in provider.get_remote_tools().items():
             choices.append({
-                tool: trans(f"remote_tool.openai.{tool}")
+                tool: trans(field.get("choice_label", field["label"])) if field.get("use_locale")
+                else field.get("choice_label", field["label"])
             })
         return choices
 
@@ -92,11 +92,19 @@ class RemoteTools:
         # from global config if not expert call
         if not is_expert_call:
             enabled["web_search"] = enabled_global(model, "web_search") # <-- from global config
-            enabled["image"] = self.window.core.config.get("remote_tools.image", False)
-            enabled["code_interpreter"] = self.window.core.config.get("remote_tools.code_interpreter", False)
-            enabled["mcp"] = self.window.core.config.get("remote_tools.mcp", False)
-            enabled["file_search"] = self.window.core.config.get("remote_tools.file_search", False)
-            enabled["computer_use"] = (mode == MODE_COMPUTER or model.id.startswith("computer-use"))
+            enabled["image"] = self.window.core.llm.get("openai").is_remote_tool_enabled("image")
+            enabled["code_interpreter"] = self.window.core.llm.get("openai").is_remote_tool_enabled("code_interpreter")
+            enabled["mcp"] = self.window.core.llm.get("openai").is_remote_tool_enabled("mcp")
+            enabled["file_search"] = self.window.core.llm.get("openai").is_remote_tool_enabled("file_search")
+            enabled["computer_use"] = (
+                mode == MODE_COMPUTER
+                or model.id.startswith("computer-use")
+                or (
+                    self.window.core.llm.get("openai").is_remote_tool_enabled("computer_use")
+                    and (model.has_mode(MODE_COMPUTER)
+                         or supports_future_computer_mode(model.provider, model.id))
+                )
+            )
         else:
             # for expert call, get from preset config
             if preset:
@@ -108,51 +116,63 @@ class RemoteTools:
                         if item in enabled:
                             enabled[item] = True
 
+        # Never expose Computer Use through an expert preset on a model that
+        # does not advertise the Computer capability.
+        if enabled["computer_use"] and not (
+                model.id.startswith("computer-use")
+                or model.has_mode(MODE_COMPUTER)
+                or supports_future_computer_mode(model.provider, model.id)
+        ):
+            enabled["computer_use"] = False
+
         # o1, o3, models do not support remote tools
         # TODO: check if really not supported
         if model.id.startswith("o1") or model.id.startswith("o3"):
             return tools
 
-        # extend local tools with remote tools
-        if enabled["computer_use"]:
-            if not model.id in OPENAI_REMOTE_TOOL_DISABLE_COMPUTER_USE:
-                tools.append(self.window.core.api.openai.computer.get_tool())
-        else:
-            if not model.id in OPENAI_REMOTE_TOOL_DISABLE_WEB_SEARCH:
-                if enabled["web_search"]:
-                    tools.append({"type": "web_search_preview"})
+        # Extend local tools with remote tools. In dedicated Computer mode the
+        # computer tool remains exclusive, matching the existing mode behavior.
+        # When enabled from Settings -> Remote tools it behaves as a regular
+        # Responses API tool and may coexist with other supported remote tools.
+        dedicated_computer = mode == MODE_COMPUTER or model.id.startswith("computer-use")
+        if enabled["computer_use"] and model.id not in OPENAI_REMOTE_TOOL_DISABLE_COMPUTER_USE:
+            tools.append(self.window.core.api.openai.computer.get_tool())
 
-            if not model.id in OPENAI_REMOTE_TOOL_DISABLE_CODE_INTERPRETER:
-                if enabled["code_interpreter"]:
+        if not dedicated_computer:
+            if (
+                    model.id not in OPENAI_REMOTE_TOOL_DISABLE_WEB_SEARCH
+                    and enabled["web_search"]
+                    and self.window.controller.chat.remote_tools.supported(model, "web_search")
+            ):
+                tools.append({"type": "web_search_preview"})
+
+            if model.id not in OPENAI_REMOTE_TOOL_DISABLE_CODE_INTERPRETER and enabled["code_interpreter"]:
+                tools.append({
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                })
+
+            if model.id not in OPENAI_REMOTE_TOOL_DISABLE_IMAGE and enabled["image"]:
+                tool = {"type": "image_generation"}
+                if stream:
+                    tool["partial_images"] = 1  # required for streaming
+                tools.append(tool)
+
+            if model.id not in OPENAI_REMOTE_TOOL_DISABLE_FILE_SEARCH and enabled["file_search"]:
+                vector_store_ids = self.window.core.llm.get("openai").get_remote_tool_config("file_search.args", "")
+                if vector_store_ids:
+                    vector_store_ids = [store.strip() for store in vector_store_ids.split(",") if store.strip()]
                     tools.append({
-                        "type": "code_interpreter",
-                        "container": {
-                            "type": "auto"
-                        }
+                        "type": "file_search",
+                        "vector_store_ids": vector_store_ids,
                     })
 
-            if not model.id in OPENAI_REMOTE_TOOL_DISABLE_IMAGE:
-                if enabled["image"]:
-                    tool = {"type": "image_generation"}
-                    if stream:
-                        tool["partial_images"] = 1  # required for streaming
-                    tools.append(tool)
-
-            if not model.id in OPENAI_REMOTE_TOOL_DISABLE_FILE_SEARCH:
-                if enabled["file_search"]:
-                    vector_store_ids = self.window.core.config.get("remote_tools.file_search.args", "")
-                    if vector_store_ids:
-                        vector_store_ids = [store.strip() for store in vector_store_ids.split(",") if store.strip()]
-                        tools.append({
-                            "type": "file_search",
-                            "vector_store_ids": vector_store_ids,
-                        })
-
-            if not model.id in OPENAI_REMOTE_TOOL_DISABLE_MCP:
-                if enabled["mcp"]:
-                    mcp_tool = self.window.core.config.get("remote_tools.mcp.args", "")
-                    if mcp_tool:
-                        mcp_tool = json.loads(mcp_tool)
-                        tools.append(mcp_tool)
+            if model.id not in OPENAI_REMOTE_TOOL_DISABLE_MCP and enabled["mcp"]:
+                mcp_tool = self.window.core.llm.get("openai").get_remote_tool_config("mcp.args", "")
+                if mcp_tool:
+                    mcp_tool = json.loads(mcp_tool)
+                    tools.append(mcp_tool)
 
         return tools

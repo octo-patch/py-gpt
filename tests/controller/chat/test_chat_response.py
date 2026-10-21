@@ -33,6 +33,8 @@ def make_window():
     window.core.presets.update_and_save = Mock()
     window.core.config = MagicMock()
     window.controller = SimpleNamespace()
+    window.controller.ui = SimpleNamespace()
+    window.controller.tabs = MagicMock()
     window.controller.chat = MagicMock()
     window.controller.chat.log = Mock()
     window.controller.chat.log_ctx = Mock()
@@ -45,6 +47,7 @@ def make_window():
     window.controller.chat.common = SimpleNamespace()
     window.controller.chat.common.lock_input = Mock()
     window.controller.chat.common.unlock_input = Mock()
+    window.controller.chat.input = SimpleNamespace(generating=True)
     window.controller.kernel = Mock()
     window.controller.kernel.stopped = Mock(return_value=False)
     window.controller.ctx = MagicMock()
@@ -61,6 +64,7 @@ def make_window():
     window.core.ctx.set_last_item = Mock()
     window.core.ctx.replace = Mock()
     window.core.ctx.save = Mock()
+    window.core.ctx.output = MagicMock()
     return window
 
 
@@ -107,9 +111,10 @@ def test_init_sets_window():
 def test_begin_locks_input_and_updates_status():
     window = make_window()
     r = Response(window)
-    ctx = SimpleNamespace()
+    ctx = DummyCtx()
+    context = SimpleNamespace(ctx=ctx)
     extra = {"msg": "starting"}
-    r.begin(ctx, extra)
+    r.begin(context, extra)
     window.controller.chat.common.lock_input.assert_called_once()
     window.update_status.assert_called_once_with("starting")
 
@@ -318,7 +323,7 @@ def test_end_updates_status_and_calls_agent_and_unlocks():
 def test_failed_logs_handles_and_unlocks_and_dispatches_error():
     window = make_window()
     r = Response(window)
-    ctx = SimpleNamespace()
+    ctx = DummyCtx()
     context = SimpleNamespace(ctx=ctx, stream=False)
     err = ValueError("err")
     extra = {"error": err}
@@ -329,3 +334,24 @@ def test_failed_logs_handles_and_unlocks_and_dispatches_error():
     assert window.dispatch.called
     ev = window.dispatch.call_args[0][0]
     assert isinstance(ev, KernelEvent)
+
+def test_agent_plugin_computer_status_uses_main_turn_not_private_worker():
+    from threading import Event
+    from pygpt_net.item.ctx import CtxItem
+    window = make_window()
+    window.controller.plugins = MagicMock()
+    window.controller.plugins.apply_cmds_all.return_value = 'OK'
+    main = CtxItem()
+    main.meta = SimpleNamespace(id=42)
+    worker = CtxItem()
+    worker.hidden = True
+    request = {'ctx': worker, 'cmds': [{'cmd': 'mouse_click', 'params': {'x': 1, 'y': 2}}], 'done': Event()}
+    response = Response(window)
+    response.agent_v2_tool_exec(SimpleNamespace(ctx=main), {}, request)
+    events = [call.args[0] for call in window.dispatch.call_args_list]
+    status = next(event for event in events if event.name == RenderEvent.TOOL_BEGIN)
+    assert status.data['ctx'] is main
+    assert status.data['meta'] is main.meta
+    assert status.data['tool_names'] == ['mouse_click']
+    assert request['done'].is_set()
+    assert 'error' not in request

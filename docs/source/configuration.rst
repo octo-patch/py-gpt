@@ -13,439 +13,924 @@ The following basic options can be modified directly within the application:
 .. image:: images/v2_settings.png
    :width: 400
 
-**General**
+The options below follow the current Settings UI metadata from ``settings.json`` and the packaged fresh-install defaults from ``config.json``. Provider- and feature-specific options are grouped by the same tabs used in the Settings window.
 
-* ``Show tray icon``: Show/hide tray icon. Tray icon provides additional features like "Ask with screenshot" or "Open notepad". Restart of the application is required for this option to take effect. Default: True.
+General
+~~~~~~~
 
-* ``Minimize to tray on exit``: Minimize to tray icon on exit. Tray icon enabled is required for this option to work. Default: False.
+* ``Clear input on send``: Clears the message editor immediately after a message is submitted, so the next message starts with an empty input field. Disable it if you want the sent text to remain available for editing or reuse. Default: True.
 
-* ``Render engine``: chat output render engine: `WebEngine / Chromium` - for full HTML/CSS and `Legacy (markdown)` for legacy, simple markdown CSS output. Default: WebEngine / Chromium.
+* ``Show tray icon``: Starts PyGPT with a system-tray icon and exposes tray actions such as opening the notepad or asking with a screenshot. A restart is required after changing this option. Default: True.
 
-* ``OpenGL hardware acceleration``: enables hardware acceleration in `WebEngine / Chromium` renderer.  Default: False.
+* ``Minimize to tray on exit``: Keeps PyGPT running in the system tray when the main window is closed instead of terminating the application. The tray icon must also be enabled. Default: False.
 
-* ``Use proxy``: Enable this option to use a proxy for connections to APIs. Default: False.
+* ``Rendering engine``: Determines which chat-output renderer PyGPT uses: the normal ``WebEngine / Chromium`` renderer provides full HTML/CSS/JavaScript output, while the ``legacy`` value uses the simpler Markdown renderer for compatibility and troubleshooting. The value is applied at startup, so changing it requires a restart.
 
-* ``Proxy address``: Proxy address to be used for connection in API SDKs; supports HTTP/SOCKS, e.g. http://proxy.example.com or socks5://user:pass@host:port
+* ``OpenGL hardware acceleration``: Enables OpenGL hardware acceleration for interface rendering. Disable it if you experience GPU driver issues, graphical artifacts, or rendering crashes. Default: True.
 
-* ``Application environment (os.environ)``: Additional environment vars to set on application start.
+* ``Use proxy``: Routes supported outbound API/SDK connections through the proxy configured below instead of connecting directly. Enable it when your network requires an HTTP/SOCKS proxy or when you deliberately want provider traffic to use one. Default: False.
 
-* ``Memory Limit``: Renderer memory limit; set to 0 to disable. If > 0, the app will try to free memory after the limit is reached. Accepted formats: 3.5GB, 2GB, 2048MB, 1_000_000. Minimum: 2GB.
+* ``Proxy address``: Specifies the proxy URL used by supported API clients when ``Use proxy`` is enabled. It may include the scheme, host, port, and optional credentials, for example ``http://proxy.example.com`` or ``socks5://user:pass@host:port``.
 
-**API Keys**
+* ``RPM limit``: Limits how many model API requests PyGPT may issue per minute. Set ``0`` to disable PyGPT-side RPM limiting. Default: 60.
 
-* ``OpenAI API KEY``: Required for the OpenAI API. If you wish to use custom endpoints or local APIs, then you may enter any value here.
+* ``Application environment (os.environ)``: Defines environment variables that PyGPT adds to its process environment during startup. Use this for provider SDKs, local model servers, proxies, or integrations that read configuration from environment variables.
 
-* ``OpenAI ORGANIZATION KEY``: The organization's API key, which is optional for use within the application.
+* ``Memory Limit``: Sets the memory threshold used by the renderer memory-management logic. When the renderer exceeds the configured threshold, PyGPT attempts to release renderer resources; set ``0`` to disable this mechanism. Accepted formats include ``3.5GB``, ``2GB``, ``2048MB`` and raw byte values; the minimum enabled limit is 2 GB. Default: 4GB.
 
-* ``API Endpoint``: OpenAI API endpoint URL, default: https://api.openai.com/v1.
+API Keys
+~~~~~~~~
 
-* ``Anthropic API KEY``: Required for the Anthropic API and Claude models.
+OpenAI
+^^^^^^
 
-* ``Deepseek API KEY``: Required for the Deepseek API.
+* ``OpenAI API key``: Supplies the credential PyGPT uses to authenticate OpenAI API requests. For OpenAI-compatible local/custom endpoints that do not validate a real OpenAI key, any non-empty placeholder may be sufficient if the client requires a key value.
 
-* ``Google API KEY``: Required for the Google API and Gemini models.
+* ``OpenAI ORGANIZATION KEY``: Supplies the optional OpenAI organization identifier used when creating OpenAI API clients. Leave it empty unless requests on your account must be associated with a specific organization.
 
-* ``HuggingFace API KEY``: Required for the HuggingFace API.
+* ``API Endpoint``: Sets the base URL used for OpenAI requests. Change it when connecting to an OpenAI-compatible gateway or self-hosted endpoint instead of the public OpenAI API. Default: ``https://api.openai.com/v1``.
 
-* ``Mistral AI API KEY``: Required for the Mistral AI API.
+* ``Use the Responses API in Chat mode``: Sends OpenAI Chat-mode requests through the Responses API instead of Chat Completions. This enables Responses-specific capabilities and remote tools where supported by the selected model. Default: True.
 
-* ``Perplexity API KEY``: Required for the Perplexity API and Sonar models.
+* ``Responses API (LlamaIndex)``: Uses the Responses API instead of the Chat Completions API in the LlamaIndex runtime for OpenAI models. This applies to LlamaIndex-backed flows, including RAG/legacy agent paths that use the OpenAI provider. Default: True.
 
-* ``xAI API KEY``: Required for the xAI API and Grok models.
+Google
+^^^^^^
 
-* ``OpenAI API version``: Azure OpenAI API version, e.g. 2023-07-01-preview
+* ``Google API key``: Supplies the credential used to authenticate Gemini Developer API requests. It is used for Google model calls unless you switch the native Google SDK to Vertex AI authentication.
 
-* ``Azure OpenAI API endpoint``: Azure OpenAI API endpoint, https://<your-resource-name>.openai.azure.com/
+* ``API Endpoint``: Sets the Google API base URL used by the OpenAI-compatible Google client path. Normally this should remain at the public Gemini compatibility endpoint unless you use a custom gateway. Default: ``https://generativelanguage.googleapis.com/v1beta/openai``.
 
-**Layout**
+* ``Use native API SDK``: Uses Google's native Gen AI SDK for Gemini requests instead of the OpenAI-compatible client path. Keep it enabled for native Google features and tool support; disable it only when you intentionally need the compatibility endpoint. Default: True.
 
-* ``Style (chat)``: Chat style (Blocks, or ChatGPT-like, or ChatGPT-like Wide. `WebEngine / Chromium` render mode only.
+* ``Use Vertex AI``: Routes native Google Gen AI SDK requests through Vertex AI rather than the standard Gemini Developer API. When enabled, the Google Cloud project, location, and credentials settings below are used for authentication and routing. Default: False.
 
-* ``Zoom``: Adjusts the zoom in chat window (web render view). `WebEngine / Chromium` render mode only.
+* ``Google Cloud project``: Identifies the Google Cloud project used for Vertex AI requests. It is used only when ``Use Vertex AI`` is enabled.
 
-* ``Font Size (chat window)``: Adjusts the font size in the chat window (plain-text) and notepads.
+* ``Google Cloud location``: Selects the Google Cloud region used for Vertex AI model requests. It is used only with Vertex AI and must match a region where the requested model is available. Default: ``us-central1``.
 
-* ``Font Size (input)``: Adjusts the font size in the input window.
+* ``Google Application credentials (path)``: Points to the Google service-account/application credentials JSON used to authenticate Vertex AI requests. Enter an absolute path to the credentials file, for example ``/home/user/credentials.json``.
 
-* ``Font Size (ctx list)``: Adjusts the font size in contexts list.
+Anthropic
+^^^^^^^^^
 
-* ``Font Size (toolbox)``: Adjusts the font size in toolbox on right.
+* ``Anthropic API key``: Supplies the credential used to authenticate Anthropic/Claude API requests. It is passed to the configured Anthropic client when Anthropic models are selected.
 
-* ``Layout density``: Adjusts layout elements density. Default: -1. 
+* ``API Endpoint``: Sets the Anthropic API base URL. Change it only when Anthropic traffic must go through a compatible proxy or gateway. Default: ``https://api.anthropic.com/v1``.
 
-* ``DPI scaling``: Enable/disable DPI scaling. Restart of the application is required for this option to take effect. Default: True. 
+* ``Use native API SDK``: Uses Anthropic's native SDK and request format for Claude instead of the OpenAI-compatible client path. Keep it enabled to use Anthropic-native features and tools supported by PyGPT. Default: True.
 
-* ``DPI factor``: DPI factor. Restart of the application is required for this option to take effect. Default: 1.0. 
+HuggingFace
+^^^^^^^^^^^
 
-* ``Auto-collapse user message (px)`` - Auto-collapse user message after N pixels of height, set to 0 to disable auto-collapse.
+* ``Hugging Face API key``: Supplies the Hugging Face access token used to authenticate requests to Hugging Face-hosted inference/router services. The token must have access to the models/endpoints you select.
 
-* ``Display tips (help descriptions)``: Display help tips, Default: True.
+* ``Router API Endpoint``: Sets the base URL for Hugging Face Router requests made through its OpenAI-compatible Chat Completions interface. Change it only if you use a compatible proxy or alternate router endpoint. Default: ``https://router.huggingface.co/v1``.
 
-* ``Store dialog window positions``: Enable or disable dialogs positions store/restore, Default: True.
+DeepSeek
+^^^^^^^^
 
-**Code syntax**
+* ``DeepSeek API key``: Supplies the credential used to authenticate requests to the configured DeepSeek API endpoint. It is used whenever a DeepSeek provider model is selected.
 
-* ``Code syntax highlight``: Syntax highlight theme in code blocks. `WebEngine / Chromium` render mode only.
+* ``API Endpoint``: Sets the base URL used for DeepSeek model requests. Change it when using a DeepSeek-compatible gateway instead of the public endpoint. Default: ``https://api.deepseek.com/v1``.
 
-* ``Disable syntax highlight``: Option to disable syntax highlighting in code blocks. `WebEngine / Chromium` render mode only.
+xAI
+^^^
 
-* ``Max chars to highlight (static)``: Sets the maximum number of characters to be highlighted in static content. Set to 0 to disable. `WebEngine / Chromium` render mode only.
+* ``xAI API key``: Supplies the inference credential used to authenticate xAI/Grok model requests. Collection-management operations use the separate Management API key instead.
 
-* ``Max lines to highlight (static)``: Sets the maximum number of lines to be highlighted in static content. Set to 0 to disable. `WebEngine / Chromium` render mode only.
+* ``Management API key``: Supplies the separate xAI Management API credential used for collection-management operations. It is not the normal inference key and is required when PyGPT creates, lists, or manages xAI Collections through the Remote vector stores tooling.
 
-* ``Max lines to highlight (real-time)``: Sets the maximum number of lines to be highlighted in real-time stream mode. Set to 0 to disable. `WebEngine / Chromium` render mode only.
+* ``API Endpoint``: Sets the base URL used for xAI/Grok inference requests. Change it only when routing xAI traffic through a compatible gateway. Default: ``https://api.x.ai/v1``.
 
-* ``Highlight every N chars (real-time)``: Sets the interval for highlighting every N characters in real-time stream mode. `WebEngine / Chromium` render mode only.
+* ``Use native API SDK``: Uses xAI's native SDK and request format instead of the OpenAI-compatible client path. Keep it enabled for xAI-native features and remote tools supported by PyGPT. Default: True.
 
-* ``Highlight every N line (real-time)``: Sets the interval for highlighting every N lines in real-time stream mode. `WebEngine / Chromium` render mode only.
+Azure OpenAI
+^^^^^^^^^^^^
 
-**Files and attachments**
+* ``OpenAI API version``: Selects the Azure OpenAI REST API version appended to Azure requests. Set it to a version supported by your Azure deployment, for example ``2023-07-01-preview``.
 
-* ``Store attachments in the workdir upload directory``: Enable to store a local copy of uploaded attachments for future use. Default: True
+* ``API Endpoint``: Sets the Azure OpenAI resource endpoint used for requests. Replace the placeholder with your Azure resource hostname, for example ``https://<your-resource-name>.openai.azure.com/``.
 
-* ``Store images, capture and uploads in data directory``: Enable to store everything in single data directory. Default: False
+Perplexity
+^^^^^^^^^^
 
-* ``Allow images as additional context``: If enabled, images can be used as additional context. Default: False
+* ``Perplexity API key``: Supplies the credential used to authenticate Perplexity/Sonar API requests. It is used when a Perplexity provider model is selected.
 
-* ``Append attachment only once (mode: always)``: If enabled, the sent attachment will be appended once to the sending message, rather than appended every time to the input prompt as additional context. Force mode - affects all models. Default: False
+* ``API Endpoint``: Sets the base URL used for Perplexity/Sonar requests. Change it only when using a compatible proxy or gateway. Default: ``https://api.perplexity.ai``.
 
-* ``Append attachment only once (mode: only if available, auto-detect)``: If enabled, the sent attachment will be appended once to the sending message, if the selected model and API handle the storage of sent messages on the server side. This may optimize token usage by sending attachments only once. Default: True
+Mistral AI
+^^^^^^^^^^
 
-* ``Model for querying index``: Model to use for preparing query and querying the index when the RAG option is selected.
+* ``Mistral AI API key``: Supplies the credential used to authenticate Mistral AI API requests. It is passed to the Mistral-compatible client for models using this provider.
 
-* ``Model for attachment content summary``: Model to use when generating a summary for the content of a file when the Summary option is selected.
+* ``API Endpoint``: Sets the base URL used for Mistral AI requests. Change it only when using a compatible proxy or gateway. Default: ``https://api.mistral.ai/v1``.
 
-* ``Use history in RAG query``: When enabled, the content of the entire conversation will be used when preparing a query if mode is RAG or Summary.
+VoyageAI
+^^^^^^^^
 
-* ``RAG limit``: Only if the option ``Use history in RAG query`` is enabled. Specify the limit of how many recent entries in the conversation will be used when generating a query for RAG. 0 = no limit.
+* ``Voyage AI API key``: Authenticates requests to Voyage AI embedding models. PyGPT can use Voyage embeddings with provider/model combinations such as Anthropic or DeepSeek when that embedding backend is selected.
 
-* ``Directory for file downloads``: Subdirectory for downloaded files, e.g. in Assistants mode, inside "data". Default: "download"
+OpenRouter
+^^^^^^^^^^
 
-**Context**
+* ``OpenRouter API key``: Supplies the credential used to authenticate model requests routed through OpenRouter. The models available to PyGPT depend on the permissions and providers available to that OpenRouter account.
 
-* ``Context Threshold``: Sets the number of tokens reserved for the model to respond to the next prompt.
+* ``API Endpoint``: Sets the OpenRouter base URL used for model requests. Change it only when routing OpenRouter-compatible traffic through another gateway. Default: ``https://openrouter.ai/api/v1``.
 
-* ``Limit of last contexts on list to show  (0 = unlimited)``: Limit of the last contexts on list, default: 0 (unlimited).
+Forge
+^^^^^
 
-* ``Show context groups on top of the context list``: Display groups on top, default: False
+* ``Forge API Key``: Supplies the credential used to authenticate requests to the configured Forge provider endpoint. It is used for models assigned to the Forge provider.
 
-* ``Show date separators on the context list``: Show date periods, default: True
+* ``API Endpoint``: Sets the Forge provider base URL used by PyGPT. Change it only when connecting through an alternate Forge-compatible gateway. Default: ``https://api.forge.tensorblock.co/v1``.
 
-* ``Show date separators in groups on the context list``: Show date periods in groups, default: True
+Eden AI
+^^^^^^^
 
-* ``Show date separators in pinned on the context list``: Show date periods in pinned items, default: False
+* ``Eden AI API key``: Supplies the credential used to authenticate Eden AI requests. It is used for models and features routed through the Eden AI provider.
 
-* ``Use Context``: Toggles the use of conversation context (memory of previous inputs).
+* ``API Endpoint``: Sets the Eden AI base URL used for requests. Change it only when your deployment requires another compatible endpoint. Default: ``https://api.edenai.run/v3``.
 
-* ``Store History``: Toggles conversation history store.
+Jev
+^^^
 
-* ``Store Time in History``: Chooses whether timestamps are added to the .txt files.
+* ``Jev API key``: Supplies the TypeSafe AI credential used by the **Jev / System One (inline)** plugin. The ``TYPESAFE_API_KEY`` environment variable takes precedence when set.
 
-* ``Context Auto-summary``: Enables automatic generation of titles for contexts, Default: True.
+* ``API base``: Sets the TypeSafe API base URL used by the Jev plugin. Default: ``https://api.typesafe.ai``. The ``TYPESAFE_BASE_URL`` environment variable takes precedence when set.
 
-* ``Lock incompatible modes``: If enabled, the app will create a new context when switched to an incompatible mode within an existing context.
+Jev is exposed in PyGPT as an API configuration tab for the plugin, not as a normal chat-model provider. The Jev model ID is configured separately in ``Plugins -> Settings -> Jev / System One`` and defaults to ``jev-latest``.
 
-* ``Search also in conversation content, not only in titles``: When enabled, context search will also consider the content of conversations, not just the titles of conversations.
+Layout
+~~~~~~
 
-* ``Show LlamaIndex sources``: If enabled, sources utilized will be displayed in the response (if available, it will not work in streamed chat).
+General
+^^^^^^^
 
-* ``Show code interpreter output``: If enabled, output from the code interpreter in the Assistant API will be displayed in real-time (in stream mode), Default: True.
+* ``Style (chat)``: Selects the visual style used to display messages and other content in the chat view. It changes presentation only and does not affect model behavior. Default: ``standard``.
 
-* ``Use extra context output``: If enabled, plain text output (if available) from command results will be displayed alongside the JSON output, Default: True.
+* ``Chat output window zoom``: Sets the scale of content displayed in the chat output, including text, code blocks, images, and controls. Use it to enlarge or shrink chat output independently of the individual font-size settings. Default: 1.0.
 
-* ``Open URLs in built-in browser``: Enable this option to open all URLs in the built-in browser (Chromium) instead of an external browser. Default: False.
+* ``Font size (chat plain text, notepads)``: Sets the base font size for plain-text chat output and notepad/editor views. It can also be adjusted interactively with ``Ctrl`` + mouse wheel in supported views. Default: 16.
 
-* ``Model used for auto-summary``: Model used for context auto-summary (generating titles in context list) (default: *gpt-4o-mini*). **Tip:** If you prefer to use local models, you should change the model here as well
+* ``Font size (input)``: Sets the font size of the main message input editor. It can also be adjusted interactively with ``Ctrl`` + mouse wheel while the input has focus. Default: 16.
 
-**Remote tools**
+* ``Font size (context list)``: Sets the text size used for conversations, projects, separators, and related entries in the context list on the left. Default: 12.
 
-Enable/disable remote tools, like Web Search, MCP or Image generation.
+* ``Font size (toolbox)``: Sets the text size used by controls and entries in the toolbox panel. Default: 12.
 
-Remote tools are available for these providers, and only via their native SDKs:
+* ``Toolbox placement``: Chooses where the toolbox is placed in the main window. Available positions are ``Left``, ``Middle``, and ``Right``; the change is applied immediately. Default: ``Middle``.
 
-* Anthropic
-* Google
-* OpenAI
-* xAI
+* ``Layout density``: Changes the spacing and compactness of application UI elements. Lower values make the interface denser while higher values add more padding and spacing; the change is applied to the active layout. Default: -1.
 
-**Models**
+* ``DPI factor``: Applies an additional scaling factor to the application UI for high-DPI or unusually scaled displays. Increase it when controls and text are too small after normal system scaling; a restart is required. Default: 1.0.
 
-* ``Max Output Tokens``: Sets the maximum number of tokens the model can generate for a single response.
+* ``DPI Scaling``: Enables Qt high-DPI scaling so the interface follows display scaling on high-resolution monitors. Disable it only when automatic DPI handling causes incorrect sizing; a restart is required. Default: True.
 
-* ``Max Total Tokens``: Sets the maximum token count that the application can send to the model, including the conversation context.
+* ``Auto-collapse user message (px)``: Automatically collapses very tall user-message blocks after they exceed the configured rendered height, keeping long pasted inputs from dominating the chat view. Set ``0`` to keep all user messages fully expanded. Default: 230.
 
-* ``RPM limit``: Sets the limit of maximum requests per minute (RPM), 0 = no limit.
+* ``Display tips (help descriptions)``: Shows contextual help text and descriptions next to configurable options throughout the interface. Disable it for a more compact settings UI once you are familiar with the controls. Default: True.
 
-* ``Temperature``: Sets the randomness of the conversation. A lower value makes the model's responses more deterministic, while a higher value increases creativity and abstraction.
+* ``Auto-open Canvas if used``: On the first model-driven Canvas/browser open in an application session, reveals the Canvas in split screen. If you later collapse split screen, PyGPT does not force it open again during that session. Default: True.
 
-* ``Top-p``: A parameter that influences the model's response diversity, similar to temperature. For more information, please check the OpenAI documentation.
+* ``Store dialog window positions``: Remembers the geometry/position of supported dialog windows and restores them the next time they are opened. Disable it if you prefer dialogs to use their default placement each time. Default: True.
 
-* ``Frequency Penalty``: Decreases the likelihood of repetition in the model's responses.
+Code syntax
+^^^^^^^^^^^
 
-* ``Presence Penalty``: Discourages the model from mentioning topics that have already been brought up in the conversation.
+* ``Code syntax highlighting``: Selects the color theme used for syntax highlighting in rendered code blocks. The ``-`` value follows the current application theme automatically (``material-darker`` for dark themes and ``github`` for light themes). It changes presentation only, not code execution. Default: ``-``.
 
-**Prompts**
+* ``Disable syntax highlighting``: Renders code blocks without token-level syntax coloring. This can reduce rendering work for very large outputs or avoid highlighting issues with unusual code; the code content itself is unchanged. Default: False.
 
-* ``Use native API function calls``: Use API function calls to run commands from plugins instead of using command prompts - disabled in Autonomous and Experts modes, default: True
+* ``Highlight every Nth line (real-time)``: Controls how often streaming code is re-highlighted as new lines arrive. Larger values reduce renderer work during long code streams at the cost of less frequent visual updates. Default: 5.
 
-* ``Command execute: instruction``: Prompt for appending command execution instructions. Placeholders: {schema}, {extra}
+* ``Highlight every N chars (real-time)``: Adds a character-count trigger for re-running syntax highlighting while code is streaming. Larger values reduce update frequency and can improve performance on large streamed responses. Default: 1000.
 
-* ``Command execute: extra footer (non-Assistant modes)``: Extra footer to append after commands JSON schema.
+* ``Max lines to highlight (real-time)``: Limits syntax highlighting during streaming to code blocks up to the configured number of lines. Blocks above the limit are left unhighlighted while streaming to avoid expensive repeated rendering; set ``0`` to disable the limit. Default: 100.
 
-* ``Command execute: extra footer (Assistant mode only)``: PAdditional instructions to separate local commands from the remote environment that is already configured in the Assistants.
+* ``Max lines to highlight (static)``: Limits syntax highlighting after a response is complete to code blocks up to the configured line count. Use a lower value if very large code blocks make final rendering slow; set ``0`` to disable the limit. Default: 3000.
 
-* ``Context: auto-summary (system prompt)``: System prompt for context auto-summary.
+* ``Max chars to highlight (static)``: Adds a character-count ceiling for syntax highlighting of completed code blocks. Very large blocks beyond the limit are rendered without token coloring to protect UI responsiveness; set ``0`` to disable the limit. Default: 350000.
 
-* ``Context: auto-summary (user message)``: User message for context auto-summary. Placeholders: {input}, {output}
+Files and attachments
+~~~~~~~~~~~~~~~~~~~~~
 
-* ``Agent: evaluation prompt in loop (LlamaIndex) - % complete``: Prompt used for evaluating (by % complete) the response in Agents (LlamaIndex/OpenAI) mode.
+General
+^^^^^^^
 
-* ``Agent: evaluation prompt in loop (LlamaIndex) - % score``: Prompt used for evaluating (by % score) the response in Agents (LlamaIndex/OpenAI) mode.
+* ``Store attachments in the workdir upload directory``: Copies uploaded attachments into PyGPT-managed upload storage so the files remain available after the original upload action. With ``Store images, captures, and uploads in the workdir data directory`` disabled, this is the base-profile ``upload`` directory. With that option enabled, upload storage follows the active runtime ``data`` workdir, including a custom project data workdir. Disable this option if you do not want PyGPT to keep its own persistent copy. Default: True.
 
-* ``Agent: system instruction (Legacy)``: Prompt to instruct how to handle autonomous mode.
+* ``Store images, captures, and uploads in the workdir data directory``: Stores generated images, screenshots/captures, and uploaded files under the active runtime ``data`` tree instead of using their normal dedicated base-profile locations. If the active conversation belongs to a project with a custom data workdir, these files follow that project directory. When disabled, ``img``, ``capture`` and ``upload`` remain in their normal base-profile locations even if the project uses a custom data workdir. The internal ``tmp`` directory is never redirected by this option. Default: False.
 
-* ``Agent: continue (Legacy)``: Prompt sent to automatically continue the conversation.
+* ``Allow images as additional context``: Allows images attached to earlier context items to be reused as additional visual context in later model requests. Disable it when images should be considered only in the message where they were explicitly attached. Default: False.
 
-* ``Agent: continue (always, more steps) (Legacy)``: Prompt sent to always automatically continue the conversation (more reasoning - "Always continue..." option).
+* ``Prefer native file upload when supported``: Sends supported files through the selected provider's native file API. Unsupported files and failed uploads fall back to local Full context. Default: False.
 
-* ``Agent: goal update (Legacy)``: Prompt to instruct how to update current goal status.
+* ``Directory for file downloads``: Chooses the subdirectory under the active runtime ``data`` directory where files downloaded by PyGPT tools and integrations are saved. For a project with a custom data workdir, the subdirectory is created below that project directory; otherwise it is relative to the shared profile ``data`` directory. Default: ``download``.
 
-* ``Experts: Master prompt``: Prompt to instruct how to handle experts.
+Chats
+~~~~~
 
-* ``Image generate``: Prompt for generating prompts for image generation (if raw-mode is disabled).
+List
+^^^^
 
-**Images and video**
+* ``Conversations shown in the list``: Number of conversations shown at a time in the conversation list. When you scroll to the bottom, the next batch is shown automatically. Set to ``0`` to show all conversations at once. Default: 1000.
 
-**Image**
+* ``Model used for auto-summary``: Selects the model that generates automatic conversation summaries/titles used in the conversation list. This model is called separately from the active chat model when auto-summary is enabled. Default: ``gpt-4o-mini``.
 
-* ``Image size``: The resolution of the generated images. Default: 1024x1024
+* ``Automatic conversation summary``: Automatically generates a short summary/title for the conversation list instead of relying only on the first message. The model is selected by ``Model used for auto-summary``. Default: True.
 
-* ``Image quality``: The image quality of the generated images. Default: standard
+* ``Show projects at the top of the conversation list``: Keeps project containers grouped before ordinary conversations in the left conversation list. Disable it to let projects follow the normal list ordering. Default: True.
 
-* ``Prompt generation model``: Model used for generating prompts for image generation (if raw-mode is disabled).
+* ``Show date separators in the conversation list``: Groups ordinary conversations under relative age/date headers in the context list, making older items easier to scan. Disable it to display a continuous list without those separators. Default: True.
 
-**Video**
+* ``Show date separators in projects in the conversation list``: Groups conversations inside each project under relative age/date headers. Default: False.
 
-* ``Aspect ratio``: Specifies the frame aspect ratio (e.g., 16:9, 9:16, 1:1). Availability depends on the selected model.
+* ``Show date separators in pinned conversations``: Adds relative age/date headers within the pinned-conversations area. Default: False.
 
-* ``Video duration``: Sets the clip length in seconds; limits may vary by model.
+* ``Search conversation content as well as titles``: Extends conversation-list search from titles/metadata to the text of stored messages. This finds more matches but can require more work on large histories. Default: True.
 
-* ``FPS``: Determines the frames per second (e.g., 24, 25, 30). Values may be rounded or ignored by the model.
+Render
+^^^^^^
 
-* ``Generate audio``: Option to include synthesized background audio if supported by the model.
+* ``Stream``: Streams model responses as they are generated instead of waiting for the complete answer before displaying it. Disable it to wait for the full response. Default: True.
 
-* ``Negative prompt``: Specifies words or phrases to avoid in the output (comma-separated).
+* ``Show time in plain text mode``: Shows timestamps next to messages when the plain-text renderer is active. Default: False.
 
-* ``Prompt enhancement model``: Defines the LLM used to refine your prompt before video generation. This is not the video model.
+The plain-text renderer itself is switched on or off with the ``text`` icon in the input-tab icon row. The icon tooltip changes between ``Switch to plain text`` and ``Switch to normal view`` according to the active renderer.
 
-* ``Video resolution``: Sets the target output resolution (e.g., 720p, 1080p). Availability depends on the model.
+* ``Show RAG sources``: Appends source nodes/documents returned by RAG retrieval to the rendered answer when source metadata is available. Default: False.
 
-* ``Seed``: Provides an optional random seed for reproducible results; leave empty for random.
+* ``Show Code Interpreter output``: Displays execution results returned by provider-side Code Interpreter tools as part of the conversation. Default: True.
 
-**Vision and camera**
+* ``Display tool calls JSON``: Shows completed tool calls as expandable input/output JSON blocks. When disabled, PyGPT does not render the prepared Tool/Tools accordion; tools that are currently executing are shown instead in one aggregated ``Tool/Tools`` status row. This setting affects presentation only and does not disable tool execution, storage, or model-facing tool protocol. Default: True.
 
-* ``Camera Input Device``: Video capture camera index (index of the camera, default: 0).
+* ``Show reasoning in real-time``: Requests and displays reasoning/thinking content exposed by supported models while a response is streaming. When disabled, PyGPT does not request or collect real-time reasoning through the supported reasoning path. Default: False.
 
-* ``Camera capture width (px)``: Video capture resolution (width).
+* ``Hide reasoning after response``: Collapses/hides the live reasoning panel when the normal answer begins/finishes according to the active renderer flow. Default: True.
 
-* ``Camera capture height (px)``: Video capture resolution (height).
+* ``Use extra context output``: Renders the human-readable/plain-text part of tool or command results in addition to their structured JSON payload when both forms are available. Default: True.
 
-* ``Camera IDX (number)``: Video capture camera index (number of camera).
+Annotations
+^^^^^^^^^^^
 
-* ``Image capture quality``: Video capture image JPEG quality (%).
+These options control whether pending annotations are cleared automatically when a message is sent. They affect annotations created in the corresponding UI surface; they do not disable annotation support itself.
 
-**Audio**
+* ``Clear annotations on message send in Canvas``: Clears pending Canvas/browser annotations after sending a message. Default: False.
 
-* ``Audio Input Backend``: Selects the backend for audio input (Native/QtMultimedia, PyAudio, PyGame)
+* ``Clear annotations on message send in Files``: Clears pending annotations from the Files preview/editor after sending a message. Default: False.
 
-* ``Audio Input Device``: Selects the audio device for Microphone input.
+* ``Clear annotations on message send in Chat``: Clears pending annotations attached to chat content after sending a message. Default: True.
 
-* ``Audio Output Backend``: Selects the backend for audio input (Native/QtMultimedia, PyAudio)
+Options
+^^^^^^^
 
-* ``Audio Output Device``: Selects the audio device for audio output.
+* ``Lock incompatible modes``: Prevents an existing conversation from being reused when you switch to a mode whose context format is incompatible with it. PyGPT creates a new context instead. Default: True.
 
-* ``Channels``: Input channels, default: 1
+* ``Open URLs in built-in browser``: Opens clicked links inside PyGPT's built-in Chromium browser rather than handing them to the operating system's default browser. Default: True.
 
-* ``Sampling Rate``: Sampling rate, default: 44100
+Context
+~~~~~~~
 
-* ``Use cache``: Use cache for generating audio files.
+The ``Context`` settings are organized into four tabs: ``General``, ``Tools``, ``Auto-strip``, and ``Advanced handling``.
 
-* ``Max files to store``: Max files to store on disk for audio cache.
+General
+^^^^^^^
 
-* ``Audio notify microphone listening start/stop``: enables audio "tick" notify when microphone listening started/ended.
+* ``Use context (memory)``: Includes previous messages from the current conversation when building new model requests, allowing the model to follow the ongoing dialogue. Disable it to send each new interaction without prior conversational context. Default: True.
 
-* ``Continuous Audio Recording (Chunks)``: Enable recording in chunks for long audio recordings in notepad (voice notes).
+* ``Max total tokens``: Sets an application-level ceiling for the total token budget used when preparing a request, including conversation context and output allowance where applicable. Set ``0`` to disable this extra limit and rely on the model/provider context window. Default: ``0``.
 
-* ``VAD prefix padding (in ms)``:  VAD prefix padding in ms, default: 300ms (Realtime audio mode)
+* ``Context threshold``: Reserves part of the model context window for the generated answer instead of filling the entire window with prompt/history tokens. Increasing it can reduce how much old context is included but leaves more room for completion. Default: ``200``.
 
-* ``VAD end silence (in ms)``: VAD end silence in ms, default: 2000ms (Realtime audio mode)
+* ``Max history items to append``: Limits how many of the most recent conversation items may be appended to a model request before token-budget fitting is applied. Set ``0`` for no item-count limit. Default: ``0``.
 
-**Indexes / LlamaIndex**
+Tools
+^^^^^
 
-**General**
+Tool-call persistence and replay options are grouped in this tab. ``Store tool calls in database`` controls durable storage, while ``Restore tool calls in runtime`` and ``Restore tool calls from history`` independently control replay for the active in-memory conversation and for history reloaded from the database.
 
-* ``Indexes``: List of created indexes.
+* ``Store tool calls in database``: Selects how tool requests/results are persisted in conversation history. ``Do not store`` keeps no durable tool payloads, ``Store truncated`` preserves the structure while truncating stored string values, and ``Store full input/output`` persists complete payloads. Default: ``Store full input/output``.
 
-**Vector Store**
+* ``Restore tool calls in runtime``: Replays completed tool calls/results from earlier turns to the model while the current conversation remains active in memory. It does not control durable database storage and does not interrupt the tool exchange currently in progress. Default: True.
 
-* ``Vector Store``: Vector store to use (vector database provided by LlamaIndex).
+* ``Restore tool calls from history``: Replays persisted tool protocol after a conversation is reloaded from the database. It requires ``Store full input/output`` and is ignored for ``Do not store`` or ``Store truncated``. Default: False.
 
-* ``Vector Store (**kwargs)``: Keyword arguments for vector store provider (api_key, index_name, etc.).
+See ``Context and memory -> Tool call storage`` for details.
 
-**Chat**
+Auto-strip
+^^^^^^^^^^
 
-* ``Chat mode``: LlamIndex chat mode for use in query engine, default: context
+The Auto-strip tab controls optional pre-processing of oversized **extra context** before it is added to a model request. It applies to text attachments, web-reader content, tool text, and retrieved evidence; original files and stored source data are not modified. Summarization uses additional model calls.
 
-* ``Use ReAct agent for Tool calls in Chat with Files mode``: Enable ReAct agent for tool calls in Chat with Files mode.
+* ``Automatically summarize extra context``: When enabled, PyGPT shortens oversized extra text before sending it to the model. The trigger is calculated from the selected model's input window and the context budget available for the current request. Default: False.
 
-* ``Auto-retrieve additional context``: Enable automatic retrieve of additional context from vector store in every query.
+* ``Model for extra context summary``: Optional model used to summarize external evidence in the context of the current question and conversation. Leave it empty to use the currently selected model. Large sources are split into chunks that fit the summary model. Default: empty.
 
-**Embeddings**
+* ``Extra context summary threshold (%)``: Starts summarization when extra text exceeds this percentage of the model input window, the currently available conversation budget, or the advanced-context threshold when advanced context handling is active. Default: ``25``.
 
-* ``Embeddings provider``: Global embeddings provider (for indexing and Chat with Files).
+* ``Extra context summary target (%)``: Sets the maximum share of the model input window that the produced extra-context summary should occupy. The actual result can be smaller because of the remaining request budget and the summary model's output limit. Default: ``10``.
 
-* ``Embeddings provider (ENV)``: ENV vars for global embeddings provider (API keys, etc.).
-
-* ``Embeddings provider (**kwargs)``: Keyword arguments for global embeddings provider (model_name, etc.).
-
-* ``Default embedding providers for attachments``: Define embedding model by provider to use in attachments.
-
-* ``RPM limit for embeddings API calls``: Specify the limit of maximum requests per minute (RPM), 0 = no limit.
-
-**Indexing**
-
-* ``Recursive directory indexing``: Enables recursive directory indexing, default is False.
-
-* ``Replace old document versions in the index during re-indexing``: If enabled, previous versions of documents will be deleted from the index when the newest versions are indexed, default is True.
-
-* ``Excluded file extensions``: File extensions to exclude if no data loader for this extension, separated by comma.
-
-* ``Force exclude files``: If enabled, the exclusion list will be applied even when the data loader for the extension is active. Default: False.
-
-* ``Stop indexing on error``: If enabled, indexing will stop whenever an error occurs Default: True.
-
-* ``Custom metadata to append/replace to indexed documents (files)``: Define custom metadata key => value fields for specified file extensions, separate extensions by comma.\nAllowed placeholders: {path}, {relative_path} {filename}, {dirname}, {relative_dir} {ext}, {size}, {mtime}, {date}, {date_time}, {time}, {timestamp}. Use * (asterisk) as extension if you want to apply field to all files. Set empty value to remove field with specified key from metadata.
-
-* ``Custom metadata to append/replace to indexed documents (web)``: Define custom metadata key => value fields for specified external data loaders.\nAllowed placeholders: {date}, {date_time}, {time}, {timestamp} + {data loader args}
-
-**Data Loaders**
-
-* ``Additional keyword arguments (**kwargs) for data loaders``: Additional keyword arguments, such as settings, API keys, for the data loader. These arguments will be passed to the loader; please refer to the LlamaIndex or LlamaHub loaders reference for a list of allowed arguments for the specified data loader.
-
-* ``Use local models in Video/Audio and Image (vision) loaders``: Enables usage of local models in Video/Audio and Image (vision) loaders. If disabled then API models will be used (GPT-4 Vision and Whisper). Note: local models will work only in Python version (not compiled/Snap). Default: False.
-
-**Update**
-
-* ``Auto-index DB in real time``: Enables conversation context auto-indexing in defined modes.
-
-* ``ID of index for auto-indexing``: Index to use if auto-indexing of conversation context is enabled.
-
-* ``Enable auto-index in modes``: List of modes with enabled context auto-index, separated by comma.
-
-* ``DB (ALL), DB (UPDATE), FILES (ALL)``: Index the data – batch indexing is available here.
-
-**Agent and experts**
-
-**General**
-
-* ``Auto retrieve additional context from RAG``: Auto retrieve additional context from RAG at the beginning if the index is provided.
-
-* ``Display a tray notification when the goal is achieved.``: If enabled, a notification will be displayed after goal achieved / finished run.
-
-* ``Display full agent output in chat window``: If enabled, a real-time output from agent reasoning will be displayed with the response.
-
-**Agents (LlamaIndex / OpenAI)**
-
-* ``Max steps (per iteration)`` - Max steps is one iteration before goal achieved
-
-* ``Max evaluation steps in loop`` - Maximum evaluation steps to achieve the final result, set 0 to infinity
-
-* ``Model for evaluation``: Model used for evaluation with score/percentage (loop). If not selected, then current active model will be used.
-
-* ``Append and compare previous evaluation prompt in next evaluation`` - If enabled, previous improvement prompt will be checked in next eval in loop, default: False
-
-* ``Split response messages`` - Split response messages to separated context items in OpenAI Agents mode.
-
-settings.agent.openai.response.split = Split response messages
-settings.agent.openai.response.split.desc = Split re
-
-**Autonomous (Legacy agents)**
-
-* ``Sub-mode for agents``: Sub-mode to use in Agent (Autonomous) mode (chat, llama_index, etc.). Default: chat.
-
-* ``Index to use``: Only if sub-mode is llama_index (Chat with files), choose the index to use in both Agent and Expert modes.
-
-* ``Use native API function calls``: Use API function calls to run tools from plugins instead of using command prompts - Autonomous mode only, default: False
-
-* ``Use Responses API in Agent mode``: Use Responses API instead of ChatCompletions API in Agent (autonomous) mode. OpenAI models only. Default: False
-
-**Experts**
-
-* ``Sub-mode for experts``: Sub-mode to use in Experts mode (chat, llama_index, etc.). Default: chat.
-
-* ``Use agent for expert reasoning``: If enabled, the ReAct agent will be used for expert calls and expert reasoning. Default: True
-
-* ``Use native API function calls``: Use API function calls to run tools from plugins instead of using command prompts - Experts only, default: False
-
-* ``Use Responses API in Experts mode (master)``: Use Responses API instead of ChatCompletions API in Experts (master model). OpenAI models only. Default: False
-
-* ``Use Responses API in Experts (slaves)``: Use Responses API instead of ChatCompletions API for Expert instances (slave models). OpenAI models only. Default: False
-
-**Accessibility**
-
-* ``Enable voice control (using microphone)``: enables voice control (using microphone and defined commands).
-
-* ``Model``: model used for voice command recognition.
-
-* ``Use voice synthesis to describe events on the screen.``: enables audio description of on-screen events.
-
-* ``Use audio output cache``: If enabled, all static audio outputs will be cached on the disk instead of being generated every time. Default: True.
-
-* ``Audio notify voice command execution``: enables audio "tick" notify when voice command is executed.
-
-* ``Control shortcut keys``: configuration for keyboard shortcuts for a specified actions.
-
-* ``Blacklist for voice synthesis events describe (ignored events)``: list of muted events for 'Use voice synthesis to describe event' option.
-
-* ``Voice control actions blacklist``: Disable actions in voice control; add actions to the blacklist to prevent execution through voice commands.
-
-**Personalize**
-
-* ``About You``: Provide information about yourself, e.g., "My name is... I'm 30 years old, I'm interested in..." This will be included in the model's system prompt. 
+Advanced handling
+^^^^^^^^^^^^^^^^^
 
 .. warning::
-   Please do not use AI as a "friend". Real-life friendship is better than using an AI as a friendship replacement. DO NOT become emotionally involved in interactions with an AI.
 
-* ``Enable in Modes``: Select the modes where the personalized "about" prompt will be used.
+   The advanced context-handling options below are **experimental**. They alter how older model-facing conversation history is compacted when a conversation approaches the usable input-context limit. The complete stored chat history is not deleted.
 
-**Updates**
+* ``Enable advanced context handling``: Enables rolling long-conversation management. Older completed turns can be compacted into per-conversation continuation notes stored in ``memory_ctx`` while only the model-facing history is trimmed. The durable ``ctx_item`` history remains stored. Default: False.
 
-* ``Check for updates on start``: Enables checking for updates on start. Default: True.
+* ``Checkpoint threshold (%)``: Creates a continuation checkpoint when the unsummarized model-facing conversation reaches this percentage of the usable input context budget. The effective budget accounts for the selected model and reserved output/safety headroom. Default: ``75``.
 
-* ``Check for updates in background``: Enables checking for updates in background (checking every 5 minutes). Default: True.
+* ``Context tail after checkpoint (%)``: Controls the target size of the recent unsummarized/verbatim conversation tail after older turns are compacted. It must remain below the checkpoint threshold; PyGPT also applies runtime safety bounds. Default: ``45``.
 
-**Debug**
+* ``Maximum continuation note characters``: Sets the character safety ceiling for compact continuation notes associated with one conversation. These notes preserve goals, decisions, completed work, constraints, findings, identifiers, and pending work across context-window rollovers. Model-facing notes are also token-clipped when necessary for the selected model. Default: ``24000``.
 
-* ``Show debug menu``: Enables debug (developer) menu.
+See ``Context and memory -> Advanced context handling (experimental)`` for the full behavior, including ``memory_ctx`` tools and Agents rolling memory.
 
-* ``Log level``: toggle log level (ERROR|WARNING|INFO|DEBUG)
+Remote tools
+~~~~~~~~~~~~
 
-* ``Log and debug context``: Enables logging of context input/output.
+Remote tools are provider-hosted capabilities that the model can invoke during a response. A toggle only makes a tool available to the request; the selected model, provider SDK, and API mode must also support it.
 
-* ``Log and debug events``: Enables logging of event dispatch.
+OpenAI
+^^^^^^
 
-* ``Log plugin usage to console``: Enables logging of plugin usage to console.
+* ``Web Search``: Makes OpenAI's provider-side Web Search tool available so supported models can retrieve current information from the web while answering. It is available on the Responses API path only. Default: True.
 
-* ``Log DALL-E usage to console``: Enables logging of DALL-E usage to console.
+* ``Image generation``: Exposes OpenAI's provider-side image-generation tool to compatible Responses API models, allowing image creation to be invoked as part of an ordinary tool-using conversation. Default: False.
 
-* ``Log attachments usage to console``: Enables logging of attachments usage to console.
+* ``Code Interpreter``: Exposes OpenAI's hosted Code Interpreter to compatible Responses API models so they can execute code in the provider environment and return computed results or generated files. Default: False.
 
-* ``Log Agents usage to console``: Enables logging of Agents usage to console.
+* ``Remote MCP``: Allows compatible OpenAI Responses API models to connect to remote MCP servers and invoke the tools exposed by those servers. The connection/tool definition is taken from ``Remote MCP configuration``. Default: False.
 
-* ``Log LlamaIndex usage to console``: Enables logging of LlamaIndex usage to console.
+* ``Remote MCP configuration``: Supplies the JSON MCP tool/server configuration included in OpenAI requests when Remote MCP is enabled. Use the request shape expected by the OpenAI Responses API, including the server URL/label and any approval or allowed-tool settings you need.
 
-* ``Log Assistants usage to console``: Enables logging of Assistants API usage to console.
+* ``File search``: Makes OpenAI's hosted File Search tool available to compatible Responses API models. It searches the OpenAI vector stores listed below rather than PyGPT's local LlamaIndex indexes. Default: False.
 
+* ``File search vector store IDs``: Lists the OpenAI vector-store IDs that File Search may query. Enter multiple IDs separated by commas; PyGPT sends them with the provider-side File Search tool definition.
+
+* ``Computer use``: Allows supported OpenAI models to request screen, mouse, and keyboard interactions through PyGPT's Computer Use flow. Enable it only when you want the model to operate the configured computer environment. Default: False.
+
+Google
+^^^^^^
+
+* ``Web Search``: Makes Google's provider-side web-search/grounding capability available to supported Gemini models, allowing them to incorporate current web information into a response. This is used through the supported native Google API path. Default: True.
+
+* ``Google Maps``: Makes Google Maps grounding available to supported Gemini models so they can use place and map information while answering. Availability depends on the selected model and Google API mode. Default: False.
+
+* ``Code Interpreter``: Makes Google's provider-hosted code-execution tool available to supported Gemini models. The model can run code remotely and use the execution result as part of its response. Default: False.
+
+* ``URL Context``: Allows supported Gemini models to fetch and use the contents of supplied URLs as provider-side context. This lets the provider process referenced pages without PyGPT first injecting their full content locally. Default: False.
+
+* ``File search``: Makes Google's provider-side File Search capability available when the selected Google API/model supports it. The tool searches the Google file-search stores identified below rather than PyGPT's local LlamaIndex indexes. Default: False.
+
+* ``File search vector store IDs``: Lists the Google file-search/vector-store IDs that the remote File Search tool may query. Enter multiple IDs separated by commas.
+
+* ``Remote MCP``: Enables Google Remote MCP through the Interactions API. In the current PyGPT implementation this remote tool is wired only into **Research** mode (Google Deep Research / Interactions API path); it is not currently used by normal Google Chat or other modes. Default: False.
+
+* ``Remote MCP configuration``: Supplies one MCP server definition or a JSON list of server definitions for Google Interactions API requests. Entries use ``type: "mcp_server"`` and must provide a server ``url``. Streamable HTTP MCP servers are supported; SSE endpoints are not supported by this Google path.
+
+* ``Computer use``: Allows supported Gemini Computer Use models to request screen, mouse, and keyboard actions through PyGPT's Computer Use flow. It has no effect for Google models that do not expose Computer Use. Default: False.
+
+Anthropic
+^^^^^^^^^
+
+* ``Web Search``: Makes Anthropic's provider-side Web Search tool available to supported Claude models so they can retrieve current web information during a response. Default: True.
+
+* ``Web Fetch``: Makes Anthropic's provider-side Web Fetch tool available so supported Claude models can retrieve the contents of specific web pages during a response. Default: False.
+
+* ``Code Execution``: Makes Anthropic's hosted code-execution environment available to supported Claude models, allowing them to run code and use the execution result in the answer. Default: False.
+
+* ``Remote MCP``: Allows supported Anthropic models to use tools exposed by configured remote MCP servers/connectors. The toolset and server definitions are taken from the two JSON fields below. Default: False.
+
+* ``Remote MCP configuration (tools)``: Defines the JSON ``tools`` payload sent with Anthropic MCP-enabled requests. Use it to declare the MCP toolsets/connectors the model is allowed to invoke.
+
+* ``Remote MCP configuration (mcp_servers)``: Defines the JSON ``mcp_servers`` payload sent to Anthropic, including the remote MCP server names, URLs, authentication, and other provider-supported connection parameters.
+
+* ``Computer use``: Allows supported Claude Computer Use models to request screen, mouse, and keyboard interactions through PyGPT's Computer Use flow. It is ignored by models without Computer Use support. Default: False.
+
+
+**Advanced provider parameters**
+
+The following fields expose optional Anthropic server-tool parameters. Values left empty, or numeric limits left at ``0``, are not sent. Domain lists are comma-separated; if both allowed and blocked domains are supplied, the allowed list takes precedence in the current implementation.
+
+* ``Web search / type``: Sets the Anthropic server-tool type identifier used for Web Search. Default: ``web_search_20250305``.
+
+* ``Web search / max uses``: Limits how many Web Search calls Anthropic may make in one request. ``0`` leaves the provider parameter unset. Default: 0.
+
+* ``Web search / allowed domains``: Restricts Web Search to a comma-separated allowlist of domains. Default: empty.
+
+* ``Web search / blocked domains``: Supplies a comma-separated blocklist of domains for Web Search when no allowlist is configured. Default: empty.
+
+* ``Web search / user location / city``: Optional city used to build Anthropic's approximate Web Search user location. Default: empty.
+
+* ``Web search / user location / region``: Optional region/state used for the approximate Web Search user location. Default: empty.
+
+* ``Web search / user location / country``: Optional country used for the approximate Web Search user location. Default: empty.
+
+* ``Web search / user location / timezone``: Optional timezone used for the approximate Web Search user location. Default: empty.
+
+* ``Web fetch / max uses``: Limits how many Web Fetch calls Anthropic may make in one request. ``0`` leaves the provider parameter unset. Default: 0.
+
+* ``Web fetch / allowed domains``: Restricts Web Fetch to a comma-separated allowlist of domains. Default: empty.
+
+* ``Web fetch / blocked domains``: Supplies a comma-separated blocklist of domains for Web Fetch when no allowlist is configured. Default: empty.
+
+* ``Web fetch / citations / enabled``: Requests citations for Anthropic Web Fetch results. When disabled, PyGPT omits the citations option from the Web Fetch tool definition. Default: True.
+
+* ``Web fetch / max content tokens``: Sets the maximum content-token budget for Web Fetch. ``0`` leaves the provider parameter unset. Default: 0.
+
+xAI
+^^^
+
+* ``Web Search``: Makes xAI's provider-side Web Search capability available to supported Grok models so they can retrieve web results while answering. Default: True.
+
+* ``X Search``: Gives supported Grok models provider-side search access to X content as a separate retrieval source. Enable it when posts/results from X should be available to the model. Default: False.
+
+* ``Code Execution``: Makes xAI's hosted code-execution environment available to supported Grok models, allowing them to run code and use the result during a response. Default: False.
+
+* ``Remote MCP``: Allows compatible xAI Responses API models to connect to remote MCP servers and invoke their exposed tools. The server definition is taken from ``Remote MCP configuration``. Default: False.
+
+* ``Remote MCP configuration``: Supplies the JSON MCP server/tool configuration included in xAI requests when Remote MCP is enabled. Use the request shape supported by the xAI Responses API.
+
+* ``Collections Search``: Lets supported Grok models search xAI-hosted Collections during a response. Only the collection IDs configured below are exposed to the search tool. Default: False.
+
+* ``Collection IDs``: Lists the xAI Collection IDs that Collections Search may query; separate multiple IDs with commas. A separate xAI Management API key is required for collection-management operations in the Remote vector stores tool.
+
+
+**Advanced provider parameters**
+
+These fields expose optional xAI search/agent-tool parameters. Their effect depends on the xAI API path and model in use (native SDK, Responses API, Realtime, or legacy Chat Completions search parameters). Empty strings and numeric limits set to ``0`` are generally omitted. Filters that are unsupported by the active xAI path are not sent.
+
+* ``Return citations``: Requests citation data from the legacy xAI Live Search/Chat Completions search path. Default: True.
+
+* ``Max results``: Sets the maximum number of search results for the legacy Live Search path. ``0`` leaves the limit unset. Default: 0.
+
+* ``Inline citations``: Requests inline citations in xAI native chat responses when that include option is supported. Default: True.
+
+* ``Include code output``: Requests Code Execution call output in xAI native chat responses. Default: True.
+
+* ``Use encrypted content``: Enables xAI's encrypted-content request option on the native chat path. Default: False.
+
+* ``Max turns``: Sets the provider-side maximum number of tool/model turns on the native chat path. ``0`` leaves the limit unset. Default: 0.
+
+* ``X / included handles``: Comma-separated X handles used as an allowlist on xAI paths that support handle filtering. Default: empty.
+
+* ``X / excluded handles``: Comma-separated X handles used as a blocklist on xAI paths that support handle filtering. Where the API accepts only one mode, PyGPT applies either the include or exclude list, not both. Default: empty.
+
+* ``X / min favs``: Minimum X post favorite count used by supported xAI search paths. ``0`` disables the filter. Default: 0.
+
+* ``X / min views``: Minimum X post view count used by supported xAI search paths. ``0`` disables the filter. Default: 0.
+
+* ``From date``: Optional start date filter passed to supported X/search paths. Use the date format expected by xAI, normally ``YYYY-MM-DD``. Default: empty.
+
+* ``To date``: Optional end date filter passed to supported X/search paths. Use the date format expected by xAI, normally ``YYYY-MM-DD``. Default: empty.
+
+* ``Web / country``: Optional two-letter country code for the legacy Web Search source. PyGPT normalizes a valid two-letter value to uppercase. Default: empty.
+
+* ``Web / safe search``: Controls the legacy xAI Web Search safe-search parameter. Choices: Default, Enabled, Disabled. ``Default`` leaves the provider parameter unset. Default: Default.
+
+* ``Web / enable image understanding``: Enables image understanding for xAI Web Search on supported native/Responses paths. Default: False.
+
+* ``X / enable image understanding``: Enables image understanding for X Search on supported xAI paths. Default: False.
+
+* ``X / enable video understanding``: Enables video understanding for X Search on supported xAI paths. Default: False.
+
+* ``Web / allowed websites``: Comma-separated website/domain allowlist used on xAI paths that support Web Search filtering. The current implementation uses at most five entries. Default: empty.
+
+* ``Web / excluded websites``: Comma-separated website/domain blocklist used when no allowlist is active. The current implementation uses at most five entries. Default: empty.
+
+* ``Web / enable image search``: Enables image search in xAI Web Search when supported by the Responses API path. Default: False.
+
+* ``Store messages``: Controls xAI native chat message storage. Choices: Default, Enabled, Disabled. ``Default`` uses PyGPT's normal provider default (enabled); image requests force storage off according to the xAI SDK guidance used by PyGPT. Default: Default.
+
+Models
+~~~~~~
+
+* ``Group model providers``: Groups models by provider in expandable submenus in the model selector below the input field. Only providers with at least one available model are shown. When set to ``False``, models are displayed in a flat list. Default: False.
+
+* ``Restore used model from stored conversation``: Restores the model saved with a conversation or preset when it is loaded. Disable it to keep the currently selected model. Default: False.
+
+* ``Max output tokens``: Caps the number of tokens PyGPT asks the model to generate in a single response where the provider/API supports an output-token limit. Set ``0`` to avoid applying an application-level cap. Default: 0.
+
+Prompts
+~~~~~~~
+
+* ``Native API tool calls``: Uses provider-native API tool/function calling whenever the selected model/provider supports it. When disabled, PyGPT invokes tools through its internal prompt-based command format and the command prompts configured below. Default: True.
+
+* ``Tool execution - system prompt``: Defines the main instruction used when PyGPT asks a model to emit tool calls in the legacy text-based command format instead of native API function calls. ``{schema}`` is replaced with the available command schema and ``{extra}`` with the configured footer.
+
+* ``Tool execution - additional footer``: Appends additional instructions to the legacy/internal tool-call prompt after the generated command schema. Use it to customize how models should format or choose internal PyGPT commands when native function calling is not used.
+
+* ``Tool execution - legacy API footer``: Provides an additional compatibility instruction used by older assistant/tool execution flows. It affects only legacy paths that still build command prompts instead of relying entirely on native provider tool calls.
+
+
+* ``Automatic conversation summary - system prompt``: Defines the system instruction sent to the auto-summary model when PyGPT generates a conversation summary/title for the conversation list. Editing it changes the style and rules of generated summaries.
+
+* ``Automatic conversation summary - user prompt``: Defines the user-message template used for automatic conversation summarization. ``{input}`` and ``{output}`` are replaced with conversation content before the summary request is sent.
+
+* ``Agent: response evaluation in loop [LlamaIndex] - % score``: Defines the LlamaIndex legacy-agent evaluation prompt that asks the evaluator to score the current result during a loop. The score is used to decide whether another improvement/evaluation step is needed.
+
+* ``Agent: response evaluation in loop [LlamaIndex] - % complete``: Defines the legacy LlamaIndex evaluation prompt that estimates how complete the current result is. The returned completion percentage participates in the agent loop's stop/continue decision.
+
+* ``Autonomous mode - instruction``: Sets the base system instruction used by Autonomous mode. It tells the model to treat the request as a multi-pass task, make concrete progress, verify and refine non-trivial work, use available tools through the normal Chat tool flow, and keep user-facing output in the user's language.
+
+* ``Autonomous mode: continue``: Defines the follow-up instruction sent when another normal Autonomous iteration is required. It asks the model to continue from the accumulated work, choose the next useful in-scope action or verification step, and avoid merely repeating the previous response.
+
+* ``Autonomous mode: continue (always, more steps)``: Defines the open-ended continuation instruction used by **Always continue**. It encourages the model to keep finding new, materially useful in-scope angles, checks, consequences, and refinements instead of voluntarily concluding the run.
+
+* ``Autonomous mode: judge``: Defines the system prompt for the hidden judge call used by **Dynamic continuous prompt**. The judge receives the original user input and the configured tail of recent Autonomous Assistant responses, treats that content only as material to review, and returns a focused instruction for the next pass rather than a user-facing answer.
+
+* ``Autonomous mode: goal update``: Defines the run-control instruction used only when **Auto-stop** is enabled. It lets Autonomous mode signal terminal states such as completion, waiting, pause, or failure. When Auto-stop is disabled, this run-control tool/instruction is not exposed to the model.
+
+* ``Expert - system prompt``: Defines the instruction that tells the current model how and when to delegate tasks through the regular ``expert_call`` tool. The prompt applies to the caller; each selected Expert is executed as a regular agent by the shared Agents / Agents v2 runtime and receives the model, system prompt, tool permissions and optional RAG configuration from its own preset.
+
+* ``Image generation``: Defines the instruction given to the prompt-enhancement LLM before an image-generation request when raw prompt mode is not used. It controls how the user's request is expanded or reformulated for the image model.
+
+* ``Video generation``: Defines the instruction given to the prompt-enhancement LLM before a video-generation request when raw prompt mode is not used. It controls how the user request is rewritten for the selected video model.
+
+Images and video
+~~~~~~~~~~~~~~~~
+
+Generation parameters that are changed frequently are configured directly in the generation toolbox. Image size is selected there from values available for the current image model. Video resolution, aspect ratio and duration are also configured in the toolbox. These controls write directly to the runtime configuration used by the generation providers and are therefore not duplicated in Settings.
+
+Image
+^^^^^
+
+* ``Image quality``: Selects the quality tier/quality hint sent with OpenAI image-generation requests. Supported values and their effect on latency or cost depend on the selected image model.
+
+* ``Prompt generation model``: Selects the text model used to expand/refine the user's image prompt before the final request is sent to the image generator. It does not choose the image-generation model itself. Default: ``gpt-5.6-luna``.
+
+Video
+^^^^^
+
+* ``Seed``: Sends an optional random seed to video models that support deterministic seeding. Currently this is used by the Google/Veo provider. Reusing the same seed can make generations more repeatable; leave it empty to let the provider choose randomness.
+
+* ``Prompt enhancement model``: Selects the text model used to expand/refine a user prompt before it is sent to the video generator. It does not select the video-generation model itself. Default: ``gpt-5.6-luna``.
+
+Vision and camera
+~~~~~~~~~~~~~~~~~
+
+Camera
+^^^^^^
+
+* ``Camera Device``: Chooses which camera PyGPT opens for live capture/snapshot features. The numeric value corresponds to the camera device index exposed by the system. Default: 0.
+
+* ``Capture width``: Requests the horizontal resolution used when PyGPT captures frames from the selected camera. The device/driver may substitute the nearest supported resolution. Default: 1280.
+
+* ``Capture height``: Requests the vertical resolution used when PyGPT captures frames from the selected camera. The device/driver may substitute the nearest supported resolution. Default: 720.
+
+* ``Capture quality``: Controls JPEG compression quality when camera frames are saved or passed through image-based workflows. Higher values preserve more detail but create larger images. Default: 95.
+
+The camera runtime controls are in the main ``Audio / Video`` menu, under the **Video** section. ``Enable camera`` starts/stops the live camera preview, while ``Auto capture`` automatically captures the current frame for compatible vision turns. With auto capture disabled, click the live camera preview to take a manual snapshot. The options in this Settings section only select the camera device and capture parameters.
+
+Audio
+~~~~~
+
+Devices
+^^^^^^^
+
+* ``Audio Input Backend``: Chooses the implementation PyGPT uses to capture microphone audio. The available backends depend on the operating system and installed audio components. Default: ``native``.
+
+* ``Audio Input Device``: Selects the microphone/input device used for recording and voice-control features. Device identifiers come from the currently selected input backend. Default: 0.
+
+* ``Audio Output Backend``: Chooses the implementation PyGPT uses for playback and speech-synthesis output. Available backends depend on the operating system and installed audio components. Default: ``native``.
+
+* ``Audio Output Device``: Selects the speaker/headphone device used for generated speech and other application audio. Device identifiers come from the currently selected output backend. Default: 0.
+
+* ``Channels``: Sets the number of audio channels captured from the microphone. ``1`` records mono audio and is appropriate for speech recognition in most cases. Default: 1.
+
+* ``Sampling Rate``: Sets the microphone capture sample rate in samples per second. Higher values preserve more high-frequency detail but increase audio data size and processing work. Default: 44100.
+
+Options
+^^^^^^^
+
+* ``Recording timeout``: Automatically stops a non-continuous microphone recording after the configured number of seconds, preventing accidental indefinitely open recordings. Set ``0`` to disable the timeout. Default: 120.
+
+* ``Continuous recording auto-transcribe interval``: Sets how often continuous recording is split into a batch and sent for transcription. Shorter intervals produce text sooner but cause more frequent transcription calls. Default: 10 seconds.
+
+* ``Continuous audio recording (batches)``: Keeps long notepad/voice-note recordings running by processing them as consecutive batches instead of one monolithic recording. Each batch can be transcribed while recording continues. Default: False.
+
+* ``Enable timeout in continuous mode``: Applies the normal recording timeout to continuous/batched recording as well. Leave it disabled if continuous recording should keep running until explicitly stopped. Default: False.
+
+* ``VAD prefix padding (in ms)``: Keeps this amount of audio immediately before Voice Activity Detection marks speech as started. The padding helps prevent the first syllable of an utterance from being clipped. Default: 300 ms.
+
+* ``VAD end silence (in ms)``: Defines how long Voice Activity Detection must observe silence before treating the current utterance as finished. Lower values respond faster; higher values tolerate longer pauses while speaking. Default: 2000 ms.
+
+* ``Audio notification for microphone listening start/stop``: Plays a short audible cue when microphone capture begins or ends, making it easier to know when PyGPT is actively listening without watching the UI. Default: True.
+
+Cache
+^^^^^
+
+* ``Enable Cache``: Caches generated speech/audio output on disk so repeated static utterances can be replayed without calling the synthesis provider again. This can reduce latency and API usage for repeated notifications. Default: True.
+
+* ``Max files to store``: Limits how many generated audio files PyGPT retains in the speech-output cache. Older cache entries can be discarded as the limit is exceeded, preventing unbounded disk growth. Default: 1000.
+
+Indexes / RAG
+~~~~~~~~~~~~~
+
+General
+^^^^^^^
+
+* ``Indexes``: List of configured indexes. Removing an entry from this list does not delete data already stored in the vector store; use ``Clear and truncate`` for permanent deletion.
+
+Vector Store
+^^^^^^^^^^^^
+
+* ``Vector Store``: Selects the storage backend in which LlamaIndex writes and queries document embeddings. Changing it determines where indexed vectors are persisted and which provider-specific connection options may be required. Default: ``ChromaVectorStore``.
+
+* ``Vector Store (**kwargs)``: Additional keyword arguments (**kwargs), such as API keys, for the Vector Store provider. These arguments will be passed to the provider; please refer to the LlamaIndex API reference for a list of required arguments for the specified Vector Store.
+
+Chat
+^^^^
+
+* ``RAG mode``: Selects how the active RAG index handles a prompt. ``Chat`` retrieves context and generates a conversational answer, ``Query the Index Only`` uses the index query path, and ``Retrieve Only`` returns retrieved context without the normal chat response. Default: ``Chat``.
+
+* ``Chat mode``: Selects the LlamaIndex chat-engine mode used when ``RAG mode`` is ``Chat``, determining how retrieved context and conversation history are combined when generating an answer. ``context`` is the default general-purpose mode. Default: ``context``.
+
+Tool-call routing in RAG-backed Chat is automatic. When the ``Tools`` switch is enabled, PyGPT uses native tool calls whenever the current model/provider path supports them. If native tool calls are unavailable, PyGPT automatically falls back to a LlamaIndex ReAct agent. The ReAct fallback is non-streaming in this integration, so streaming is disabled automatically only for that fallback path. There is no separate ReAct setting.
+
+* ``Auto-retrieve additional context``: Runs retrieval for every RAG-backed Chat query and injects the matching indexed content into the model context automatically. Disable it if retrieval should happen only through an explicit agent/tool path. Default: True.
+
+Embeddings
+^^^^^^^^^^
+
+* ``Embeddings provider``: Selects the global embedding provider used for indexing and RAG. Credentials and endpoints are resolved from that provider's normal global configuration (``API Keys`` or ``Custom providers``), so they do not need to be duplicated in the embedding configuration. Default: ``openai``.
+
+* ``Default embedding models``: Defines the default embedding model for each provider. The same list is used for file indexing, conversation-context indexing, and attachment RAG. For provider-aware automatic embedding, PyGPT uses the entry matching the active model/provider when one is configured; otherwise it falls back to the global embedding provider and its default model.
+
+* ``RPM limit``: Throttles embedding requests issued during indexing/retrieval to the configured number per minute, helping stay within provider rate limits. Set ``0`` to disable PyGPT-side throttling. Default: 100.
+
+* ``Embeddings timeout``: Sets the timeout for embedding-provider requests, in seconds. Default: 60.
+
+The two options below are shown in the collapsed **Advanced** group at the bottom of the Embeddings tab. They are optional overrides; leave them empty for the normal provider-based configuration described above.
+
+* ``Global embeddings provider **kwargs``: Optional keyword-argument overrides passed to the embedding provider. Use them only for provider-specific parameters or deliberate overrides. When empty, PyGPT uses the model from ``Default embedding models`` and credentials/endpoint from the provider's global settings. Default: empty list.
+
+* ``Global embeddings provider ENV vars``: Optional environment-variable overrides applied before the embedding provider is initialized. Use them only when a backend specifically requires an ENV override. When empty, credentials and endpoint come from the provider's global settings. ``{config_key}`` can reference a PyGPT configuration value. Default: empty list.
+
+File indexing
+^^^^^^^^^^^^^
+
+* ``Recursive directory indexing``: When a directory is indexed, also walks its subdirectories and includes matching files found below the selected directory. Disable it to index only files directly inside the chosen folder. Default: True.
+
+* ``Replace old document versions in the index during re-indexing``: Removes previously indexed chunks for a document before storing its newly indexed version, preventing stale and current versions from coexisting in retrieval results. Disable it only if you intentionally want historical versions retained. Default: True.
+
+* ``Excluded file extensions``: Lists file extensions that should be skipped by directory/file indexing when no active data loader explicitly handles them. Separate multiple extensions with commas.
+
+* ``Force exclude files``: Makes the excluded-extension list authoritative even when a configured data loader could otherwise process that file type. Use it to block specific extensions from indexing under all loader configurations. Default: False.
+
+* ``Stop indexing when an error occurs``: Aborts the current indexing job on the first file/loader error instead of continuing with the remaining items. Disable it when partial indexing is preferable to failing the whole batch. Default: True.
+
+* ``Custom metadata to add to or replace in indexed documents (files)``: Adds or overrides metadata fields on file-derived LlamaIndex documents, optionally scoped by file extension. Values can be generated from placeholders such as ``{path}``, ``{filename}``, ``{ext}``, ``{size}``, ``{mtime}``, and date/time placeholders before documents are written to the index.
+
+* ``Custom metadata to add to or replace in indexed documents (web/external content)``: Adds or overrides metadata fields on documents produced by web/external data loaders. Values may reference date/time placeholders and loader arguments, allowing metadata to be derived from the source configuration before indexing.
+
+Context indexing
+^^^^^^^^^^^^^^^^
+
+* ``Conversation auto-indexing``: Controls automatic indexing of stored conversation context. Available values are ``Off``, ``Auto-index all conversations``, and ``Auto-index only in projects``. Default: Off.
+
+* ``Use isolated index per project``: When enabled, conversations inside projects are indexed into a separate isolated project index. When disabled, project conversations use the selected global auto-indexing indexes. Default: True.
+
+* ``Indexes for global auto-indexing``: Multi-select list of one or more configured indexes used for global conversation auto-indexing. This option does not apply to isolated project indexes. Default: base.
+
+* ``Enable auto-indexing in modes``: Restricts automatic conversation indexing to the selected PyGPT modes. A conversation is auto-indexed only when the global/project auto-indexing policy is enabled and its current mode is included here.
+
+Data loaders
+^^^^^^^^^^^^
+
+* ``Additional keyword arguments (**kwargs) for data loaders``: Additional keyword arguments (**kwargs), such as settings, API keys, for the data loader. These arguments will be passed to the loader; please refer to the PyGPT documentation or LlamaHub loaders reference for a list of allowed arguments for the specified data loader. One argument per single row.
+
+* ``Use local models in Video/Audio and Image (vision) loaders``: Enable usage of local models in Video/Audio and Image (vision) loaders. If disabled, the Image (vision) loader uses the image model configured in the ``RAG (inline)`` plugin, while Video/Audio transcription uses the speech-recognition provider configured in the ``Audio input`` plugin. Local models work only in the Python version (not compiled/Snap). Default: False.
+
+Clear and truncate
+^^^^^^^^^^^^^^^^^^
+
+Use this tab to permanently remove all data from a selected stored index or to truncate all tracked project indexes. Removing an entry from the normal ``Indexes`` list does not delete vector-store data. Destructive truncate operations require confirmation.
+
+See :doc:`indexing` for the complete description of global context indexing, isolated project indexes, ``Current project``, project lifecycle, and index cleanup.
+
+Agents and experts
+~~~~~~~~~~~~~~~~~~
+
+Agents
+^^^^^^^^^^^^^^^^
+
+* ``Automatically retrieve additional context from RAG``: Performs an initial retrieval from the configured index before a Agents run and supplies the matching RAG context to the workflow. Disable it if the agent should begin without automatic retrieval and obtain context only through explicit tools. Default: True.
+
+* ``Add support for .agents directory``: Checks the active workdir at run start. If ``%workdir%/.agents/`` exists, the top-level Agents agent receives its layout and guidance to use relevant project instructions/resources; otherwise it receives only a short note that ``.agents/`` may be created and ``.agents/memories/`` used for persistent notes. PyGPT does not preload the directory contents. Default: True.
+
+* ``Show tools in Agents``: Shows expandable tool calls beneath Agents status rows during a workflow and when restoring a conversation from history. Each tool call can be expanded to view its input and output. When disabled, status updates remain visible, but individual tool calls are not sent to the chat web view or rendered from history. Default: False.
+
+* ``Show full tool-chain in Agents``: When enabled, the final Agents response stores and displays the full sequence of normal tool calls executed across the workflow. Each tool call is shown as its own expandable item with Request and Response data. Internal orchestration and worker-management tools are excluded. Default: False.
+
+* ``Display full agent workflow``: Keeps the complete visible sequence of persisted Agents partial responses in the chat after the workflow finishes and after the conversation is reloaded. Disable it to collapse completed turns to the final response only. This affects UI rendering only and is independent from ``Restore full workflow history on next request``. Default: False.
+
+* ``Restore full workflow history on next request``: Controls the model-facing history restored from completed Agents turns. When enabled, later requests replay the full persisted workflow, including intermediate main-agent output and worker results. This can improve continuity and accuracy but uses more input tokens. When disabled, only the final response from each completed turn is restored, reducing token usage at the cost of less detailed workflow context. The full workflow remains stored in the database/UI. The live history token estimate and Advanced Context Handling checkpoint sizing/snapshots follow the same selection. Default: True.
+
+* ``Single live status per part``: While streaming, keeps one tool/status row for the current response part and updates it in place. Previous parts keep their latest status. The shared renderer also applies to compatible Chat tool/status events. Default: True.
+
+* ``Single status per part in unfinished history``: When an unfinished or failed turn without a final response is reloaded, shows only the latest tool/status row for each part instead of restoring the full temporary status timeline. Default: True.
+
+* ``Max iterations (Chat / Orchestrator)``: Maximum number of main-agent iterations in Chat and Orchestrator modes. Set ``0`` for no application-level iteration limit. Default: ``48``.
+
+* ``Max workers (Chat / Orchestrator)``: Maximum number of worker agents that can be created in Chat and Orchestrator workflows. Set ``0`` for no worker limit. Default: ``16``. This setting does not limit Swarm size.
+
+* ``Max iterations (Swarm)``: Maximum number of main-agent/orchestrator iterations in Swarm mode. Set ``0`` for no application-level iteration limit. Default: ``4096``.
+
+* ``Worker max iterations``: Maximum number of iterations for each worker agent in any Agents mode. Set ``0`` for no application-level iteration limit. Default: ``24``.
+
+Use ``Config -> Agent Workflows...`` (or the settings icon in the Agents toolbox) to edit built-in Chat/Orchestrator/Swarm prompts and create custom workflows. Older custom profiles without a runtime setting continue to use **Orchestrator**. See :doc:`modes` -> **Agents / Agent Workflows** for details.
+
+An iteration is an internal reasoning/tool-call cycle, not a user message turn. Increasing or disabling iteration limits can increase latency, token/API usage, and tool execution. The Chat/Orchestrator worker limit controls the number of workers created in those workflows; ``0`` removes that limit. Swarm is not constrained by this setting and uses its separately declared worker count.
+
+Custom agents
+^^^^^^^^^^^^^
+
+* ``Add support for .agents directory``: Checks the active workdir at run start for LlamaIndex Custom agents. Existing ``.agents/`` directories receive the full project-directory guidance; otherwise only the short ``.agents/memories/`` creation/note hint is added. Files are read by the agent when needed and are not preloaded by PyGPT. Default: True.
+
+* ``Max steps (per iteration)``: Limits how many action/reasoning steps a Custom agent may perform within one iteration while working toward its goal. Set ``0`` for no application-level step limit. The settings control accepts values up to ``1000``. Raising or disabling the limit can increase latency, token/API usage, and tool execution. Default: 10.
+
+* ``Max evaluation steps in loop``: Limits how many evaluate/improve cycles a Custom agent may perform before returning its final result. Set ``0`` for no application-level evaluation-loop limit. Default: 3.
+
+* ``Model for evaluation``: Optionally overrides the model used by the Loop / Evaluate evaluator. Leave it empty to use the model selected for the current Custom agent run.
+
+* ``Append and compare the previous evaluation prompt in the next evaluation``: Carries the previous evaluator feedback/improvement instruction into the next evaluation cycle so the evaluator can compare progress against earlier guidance. This can improve continuity across multi-step refinement loops. Default: False.
+
+
+Autonomous
+^^^^^^^^^^
+
+* ``Dynamic continuous prompt``: Enables the hidden judge step after each completed Autonomous pass. The judge uses the same selected model, with tools disabled, to review the original user input together with the configured recent response tail and generate the next continuation instruction. If the hidden call fails or returns an empty result, PyGPT falls back to the normal static continuation prompt. Default: True.
+
+* ``Responses to judge``: Limits how many of the most recent Autonomous Assistant responses are included in each judge request. The original user input is always included. Set ``0`` for all Assistant responses produced since the current user input. Default: ``3``.
+
+* ``Show infinite loop warning``: Shows a confirmation dialog before starting an Autonomous run when the configured run limit is ``0``. The confirmation contains **Do not show again**; accepting the run with that checkbox selected disables future warnings. Re-enable this setting to show the warning again. Default: True.
+
+Options
+^^^^^^^
+
+* ``Display full agent output in chat view``: Controls whether the complete output from Custom agents mode is rendered in the chat view. This setting is kept for older agent implementations and does not control the Agents tool-chain display. Default: True.
+
+* ``Display a tray notification when the goal is achieved.``: Shows a system tray notification when a Custom agent finishes or achieves its goal. This setting does not control Agents workflow status or tool-chain rendering. Default: True.
+
+Accessibility
+~~~~~~~~~~~~~
+
+* ``Enable voice control (using the microphone)``: Listens for configured voice commands through the selected microphone and maps recognized commands to PyGPT actions. Voice control remains inactive when this option is disabled. Default: False.
+
+* ``Model``: Selects the model used to interpret transcribed speech as PyGPT voice-control commands. It is used for command recognition, not for the normal chat response. Default: ``gpt-4o-mini``.
+
+* ``Use voice synthesis to describe events on the screen.``: Speaks supported UI/application events through the configured text-to-speech output, providing audible feedback without requiring the screen to be read visually. Events on the blacklist below are skipped. Default: False.
+
+* ``Audio notification for voice command execution``: Plays an audible cue when a recognized voice-control command begins execution, confirming that PyGPT accepted the spoken command. Default: True.
+
+* ``Use audio output cache``: Reuses disk-cached audio for repeated static accessibility/voice-output phrases instead of synthesizing the same phrase again. This reduces repeated TTS calls and response latency at the cost of local cache storage. Default: True.
+
+* ``Control shortcut keys``: Opens/configures the mapping between PyGPT actions and keyboard shortcuts used by accessibility/voice-control workflows. The same action mapping is used when recognized voice commands trigger application commands.
+
+* ``Blacklist for voice synthesis event descriptions (ignored events)``: Lists application events that should remain silent even when spoken event descriptions are enabled. Use it to suppress repetitive or unhelpful announcements without disabling voice synthesis globally.
+
+* ``Voice control action blacklist``: Lists PyGPT actions that voice control is not permitted to execute. This lets you keep voice control enabled while blocking sensitive, disruptive, or unwanted commands.
+
+Security
+~~~~~~~~
+
+Security settings control host-side filesystem access, system commands used by plugins, and confirmation of provider-flagged Computer Use operations. These controls apply only to **non-sandbox** execution. When a plugin command or Computer Use action runs in a configured sandbox, the Security restrictions below are bypassed because the sandbox provides its own isolation.
+
+General
+^^^^^^^
+
+* ``Restrict plugin file reads to working directory``: When enabled, plugin-mediated reads of local files are limited to the active conversation's runtime ``data`` directory. For a project with a custom data workdir, the project directory is used; otherwise the shared profile ``data`` directory is used. The application-owned internal ``tmp`` directory from the base profile is also allowed so built-in temporary workflows such as IPython and Canvas can operate. Default: True.
+
+* ``Restrict plugin file writes to working directory``: When enabled, plugin-mediated writes, modifications, moves, and deletes are limited to the active conversation's runtime ``data`` directory (plus the application-owned base-profile ``tmp`` directory). Default: True.
+
+* ``Enable system command whitelist``: When enabled, non-sandbox plugin commands may execute only command names listed in the whitelist for the current operating system. Command names are separated by commas or semicolons. When enabled, the whitelist takes precedence over the blacklist. Default: False.
+
+* ``Auto-prevent prompt injections``: When enabled, PyGPT appends the configured prompt-injection security annotation to system prompts across work modes and auxiliary model calls. The annotation tells the model to treat RAG/retrieval, tool output, files, web/API content, and other external content as untrusted data rather than instructions. Default: True.
+
+* ``Prompt injection security annotation``: Editable security instruction appended when automatic prompt-injection prevention is enabled. The default text tells the model to ignore instructions embedded in external content, especially attempts to override system or user instructions, and to inform the user when a likely prompt-injection attempt is detected.
+
+Computer use
+^^^^^^^^^^^^
+
+* ``Show computer use warning``: Displays the warning badge and a green overlay frame around the screen while Computer Use controls the host computer. Applies only to non-sandbox execution. Disabling it hides both indicators without changing execution permissions. Configuration key: ``security.computer.show_warning``. Default: True.
+
+* ``Halt on potentially unsafe operation``: Non-sandbox only. When enabled, Computer Use pauses before an operation that the API provider flags as requiring user confirmation. PyGPT displays a warning in the chat and waits until the user types ``continue``. The paused mouse/keyboard action is executed only after that confirmation, and only then is the provider safety check acknowledged back to the API. When disabled, provider safety checks are acknowledged automatically as before. Sandbox execution is not affected. Default: True.
+
+Linux
+^^^^^
+
+* ``System command whitelist``: Defines the comma- or semicolon-separated executable/command names allowed for non-sandbox plugin execution on Linux when the whitelist is enabled. The default list contains common file-listing, inspection, and text-processing commands such as ``ls``, ``cat``, ``grep``, and ``sed``.
+
+* ``System command blacklist``: Defines executable/command names blocked for non-sandbox plugin execution on Linux when the whitelist is disabled. Separate names with commas or semicolons. The default blacklist is empty to preserve existing behavior.
+
+Windows
+^^^^^^^
+
+* ``System command whitelist``: Defines the comma- or semicolon-separated executable/command names allowed for non-sandbox plugin execution on Windows when the whitelist is enabled. The default list contains common commands such as ``dir``, ``type``, and ``findstr``.
+
+* ``System command blacklist``: Defines executable/command names blocked for non-sandbox plugin execution on Windows when the whitelist is disabled. Separate names with commas or semicolons. The default blacklist is empty to preserve existing behavior.
+
+macOS
+^^^^^
+
+* ``System command whitelist``: Defines the comma- or semicolon-separated executable/command names allowed for non-sandbox plugin execution on macOS when the whitelist is enabled. The default list contains common file-listing, inspection, and text-processing commands such as ``ls``, ``cat``, ``grep``, and ``sed``.
+
+* ``System command blacklist``: Defines executable/command names blocked for non-sandbox plugin execution on macOS when the whitelist is disabled. Separate names with commas or semicolons. The default blacklist is empty to preserve existing behavior.
+
+If access is blocked, the plugin returns a ``Permission denied`` result that points to ``Settings -> Security``. The checks are shared by filesystem-capable plugins and host-side command execution, including Files I/O, Web search file upload/download paths, System (OS), Custom commands, Python interpreter host execution, server transfers, and integrations that upload or save local files.
+
+.. important::
+
+   These settings are application-level guards, not a process sandbox. Arbitrary host code (for example Python code intentionally executed outside the sandbox) may use operating-system APIs directly. For process-level isolation, use the plugin sandbox; sandbox execution is intentionally not filtered by these Security settings.
+
+Personalize
+~~~~~~~~~~~
+
+* ``About You``: Provide information about yourself, e.g., "My name is... I'm 30 years old, I'm interested in..." This will be included in the model's system prompt. WARNING: Please do not use AI as a "friend". Real-life friendship is better than using an AI as a friendship replacement. DO NOT become emotionally involved in interactions with an AI.
+
+* ``Enable in modes``: Chooses which PyGPT modes receive the text from ``About You`` in their system context. Modes not selected here operate without the personalization block even when ``About You`` contains text.
+
+Custom providers
+~~~~~~~~~~~~~~~~
+
+* ``Custom providers``: OpenAI Chat Completions-compatible providers configured with a ``Provider name``, ``API base URL``, and optional ``API key``. They become available after Settings are saved.
+
+  Custom providers appear in model provider selectors and in ``Config -> Models -> Import``. Normal Chat requests use the native OpenAI SDK against the configured base URL. When Chat is routed through RAG, PyGPT uses LlamaIndex ``OpenAILike``. The model importer reads the OpenAI-compatible ``/models`` endpoint.
+
+Updates
+~~~~~~~
+
+* ``Check for updates at startup``: Performs an update/version check when PyGPT launches and can inform you when a newer release is available. Disable it to avoid the startup check. Default: True.
+
+* ``Check for updates in the background``: Periodically performs update/version checks while PyGPT is running, so new releases can be detected without restarting the application. Default: True.
+
+Debug
+~~~~~
+
+* ``Show debug menu``: Makes the developer/debug menu and its diagnostic actions visible in the application UI. It is intended for troubleshooting and development rather than normal use. Default: False.
+
+* ``Log level``: Controls the verbosity of application logging: ``1`` records INFO-level diagnostics and ``2`` records DEBUG-level detail. Starting PyGPT with ``--debug=1`` or ``--debug=2`` overrides this setting and forces logging to ``%workdir%/app.log``.
+
+* ``Log conversation processing``: Writes conversation-context input/output diagnostics to the configured logs/console, helping trace what context is being built and processed. Because context can contain user data, disable or protect logs when debugging is not required. Default: True.
+
+* ``Log events``: Logs application event dispatch and handling, which is useful for tracing UI/controller workflows and plugin hooks. It can be noisy during normal use. Default: False.
+
+* ``Log plugin usage to console``: Prints plugin invocation/activity diagnostics to the console so plugin execution can be traced during development or troubleshooting. Default: False.
+
+* ``Log API inputs``: Logs provider and LlamaIndex API inputs to the terminal, including request arguments, paths, current input/history and LlamaIndex LLM constructor arguments. Known secrets are masked, but request data can still contain sensitive conversation or file information. Default: False.
+
+* ``Log API outputs``: Logs concise API response summaries to the terminal. Streaming responses are aggregated with chunk counts/types instead of logging every individual delta. Default: False.
+
+* ``Log tool calls``: Logs tool calls and full tool results to the terminal, including parameters, call IDs and response payloads. Tool payloads can contain sensitive data or large outputs. Default: False.
+
+* ``Log image and video generation to console``: Prints image- and video-generation request/activity diagnostics to the console. Use it to troubleshoot provider calls and generation flow. Default: False.
+
+* ``Log attachments usage to console``: Prints attachment-processing decisions and related activity to the console, helping diagnose upload, extraction, RAG, or native-attachment handling. Default: False.
+
+* ``Log Agents usage to console``: Prints general agent execution diagnostics to the console, including activity from agent workflows not covered by the more specialized Agents logging options. Default: False.
+
+* ``Log Agents workflow``: Logs a concise Agents workflow trace, including orchestration events, tool names, statuses, waits, and response previews without full prompts or large payloads. Default: False.
+
+* ``Log Agents (verbose mode, full output)``: Logs the complete Agents orchestration flow, including system prompts, tool availability and calls, worker operations/state, inputs, outputs, RAG context, and workflow lifecycle. This may contain sensitive data. Default: False.
+
+* ``Log LlamaIndex usage to console``: Prints LlamaIndex indexing, retrieval, and query-flow diagnostics to the console. Enable it when troubleshooting RAG or vector-store behavior. Default: False.
+
+* ``Log Realtime sessions to console``: Prints lifecycle and provider diagnostics for Realtime/audio sessions to the console. This is useful for connection, streaming, and event troubleshooting. Default: False.
+
+* ``Log legacy API usage to console``: Prints diagnostics for older/legacy API and assistant execution paths that are still supported for compatibility. Enable it when debugging those paths specifically. Default: False.
+
+* ``Log package installations``: Writes output from Package Manager install/uninstall operations to ``extra_packages/packages.log`` in addition to the Package Manager window. Default: False.
+
+* ``Log auto-update flow``: Logs automatic update-check/update workflow diagnostics. Enable it when troubleshooting the updater. Default: False.
+
+Package Manager
+---------------
+
+Open ``Config -> Package Manager`` to install or remove optional Python packages used by PyGPT itself. This is the application-runtime package environment. It is deliberately separate from both built-in Python/System sandboxes and Docker: installing a package here makes it available to PyGPT features and external Add-ons, not to a sandboxed model runtime.
+
+PyGPT installs these packages with ``uv`` into an application-wide, Python-version-specific directory:
+
+.. code-block:: text
+
+   <application base workdir>/extra_packages/<major.minor>/
+
+For example, a Python 3.13 build uses ``extra_packages/3.13``. The directory is shared by all profiles that use the same application base workdir. Keeping packages separated by Python version prevents binary or ABI-incompatible packages from an older bundled/runtime Python version from being reused after an upgrade. When PyGPT later runs with another Python minor version, a separate directory is selected automatically.
+
+The manager accepts normal package requirements such as ``httpx``, ``httpx>=0.27,<1.0`` or ``package[extra]>=1.0``. Direct package URLs are intentionally not accepted by the Add-on dependency resolver. Environment markers are evaluated for the current runtime. Packages already supplied by the main PyGPT environment are constrained during installation so optional packages do not silently replace core runtime dependencies with incompatible versions.
+
+Install/uninstall operations are transactional. PyGPT copies the current ``extra_packages`` environment to a temporary staging directory, runs ``uv pip`` against that staging copy, and swaps it into place only after the operation succeeds. Cancellation or installation failure therefore leaves the live package directory intact. A per-installation lock also prevents two PyGPT instances from changing the package directory at the same time.
+
+The Package Manager dialog shows currently installed packages, accepts one requirement per line, displays installer output, and uses the standard progress dialog. Packages installed successfully are added to the running Python import path. Pure-Python packages that have not already been imported can often be used immediately, but a restart may still be required for compiled/native extensions or modules whose old version is already loaded in the process.
+
+External Add-ons integrate with the same manager through ``manifest.json -> external_dependencies``. During Add-on installation PyGPT checks required dependency versions; when something is missing it asks the user to install the requirements before completing the Add-on installation. Dependencies marked ``optional: true`` are not installed automatically. On startup PyGPT also checks installed Add-ons against the currently selected Python-version directory, which makes dependency repair possible after a bundled/runtime Python upgrade. See :doc:`addons_api` for the manifest syntax and publishing workflow.
+
+Local Whisper uses this same mechanism when ``openai-whisper`` is not installed. The selected model checkpoint is downloaded separately by Whisper on first use.
+
+``Log package installations`` under Debug writes Package Manager operations to ``extra_packages/packages.log`` in addition to the dialog output.
 
 JSON files
 -----------
@@ -459,34 +944,83 @@ These configuration files are located in the user's work directory within the fo
 
 Manual configuration
 ---------------------
-You can manually edit the configuration files in this directory (this is your work directory):
+
+PyGPT uses two related paths:
+
+* the **application base workdir**, which by default is ``{HOME_DIR}/.config/pygpt-net/`` and owns ``path.cfg``;
+* the active **profile/application workdir**, which is normally the same directory but may be redirected elsewhere by the contents of ``path.cfg``.
+
+The application base workdir also owns runtime data shared across profiles:
+
+.. code-block:: text
+
+   <application base workdir>/
+   ├── path.cfg
+   ├── addons/
+   │   ├── themes/                 # application-wide Theme Add-ons
+   │   └── locale/                 # application-wide Locale Add-ons
+   ├── css/                        # optional application-wide custom CSS/themes
+   ├── locale/                     # optional application-wide locale overrides
+   ├── sandbox/                    # shared built-in Python/System runtime
+   └── extra_packages/             # shared Package Manager dependencies, grouped by Python version
+
+``addons``, ``sandbox`` and ``extra_packages`` stay in the application base workdir even when ``path.cfg`` points the active profile/workdir to another directory. The application-base ``css`` and ``locale`` directories are also loaded as shared customization layers. Profile-local ``css`` / ``locale`` directories remain supported as final explicit overrides. For example, Package Manager dependencies for Python 3.13 are stored under ``<application base workdir>/extra_packages/3.13``.
+
+You can manually edit the profile configuration files in the active profile/application workdir. With the default configuration this is:
 
 .. code-block:: ini
 
    {HOME_DIR}/.config/pygpt-net/
 
-* ``assistants.json`` - stores the list of assistants.
 * ``attachments.json`` - stores the list of current attachments.
 * ``config.json`` - stores the main configuration settings.
 * ``models.json`` - stores models configurations.
 * ``cache`` - a directory for audio cache.
-* ``capture`` - a directory for captured images from camera and screenshots
-* ``css`` - a directory for CSS stylesheets (user override)
-* ``history`` - a directory for context history in ``.txt`` format.
+* ``capture`` - the base-profile directory for captured images from camera and screenshots; when consolidated data storage is enabled, captures are stored under the active runtime ``data`` workdir instead.
+* ``css`` - profile-specific theme directories and optional global CSS overrides
 * ``idx`` - ``LlamaIndex`` indexes
-* ``img`` - a directory for images generated with ``DALL-E 3`` and ``DALL-E 2``, saved as ``.png`` files.
+* ``img`` - the base-profile directory for generated images; when consolidated data storage is enabled, generated images are stored under the active runtime ``data`` workdir instead.
 * ``locale`` - a directory for locales (user override)
-* ``data`` - a directory for data files and files downloaded/generated by models.
+* ``data`` - the shared/default directory for data files and files downloaded/generated by models. A project may override only this logical directory with its own runtime data workdir.
 * ``presets`` - a directory for presets stored as ``.json`` files.
-* ``upload`` - a directory for local copies of attachments coming from outside the workdir
+* ``upload`` - the base-profile directory for local copies of attachments; when consolidated data storage is enabled, upload storage is placed under the active runtime ``data`` workdir instead.
+* ``tmp`` - application-managed temporary files (for example audio input, Canvas, Python interpreter/IPython and Transcript working files); this directory always remains in the base profile workdir and is never replaced by a project data workdir.
 * ``db.sqlite`` - a database with contexts, notepads and indexes data records
 * ``app.log`` - a file with error and debug log
+
+Project data workdirs
+~~~~~~~~~~~~~~~~~~~~~
+
+The directory above is the active **profile/application workdir**. Projects do not
+replace it. A project can override only the logical ``data`` directory used by
+conversations assigned to that project. The application-wide ``addons``,
+``sandbox`` and ``extra_packages`` directories are not profile-level paths; they
+remain under the application base workdir that owns ``path.cfg``.
+
+When creating a project, ``Use shared workdir`` is enabled by default. Disable
+it to choose a custom project data directory. For an existing project use
+``RMB -> Edit``. The project item tooltip shows the effective directory.
+Conversations outside projects and projects using the shared workdir continue to
+use ``<profile workdir>/data``.
+
+This runtime override is used by the Files view, Files I/O, Python interpreter,
+filesystem-aware tools, file-download paths and Docker ``/mnt/data`` mappings. It
+does **not** relocate ``config.json``, ``models.json``, ``db.sqlite``, ``tmp``,
+``cache``, ``css``, ``locale``, fonts, logs or other profile-level paths.
+``tmp`` always remains in the base profile workdir. ``img``, ``capture`` and
+``upload`` follow the project data workdir only when ``Store images, captures,
+and uploads in the data directory`` is enabled; otherwise they remain in their
+base-profile locations.
+
+Internally, portable paths written as ``%workdir%/data/...`` are resolved
+against the active conversation's data root at runtime. Other ``%workdir%``
+paths keep their normal profile-level meaning.
 
 
 Setting the Working Directory Using Command Line Arguments
 ----------------------------------------------------------
 
-To set the current working directory using a command-line argument, use:
+To set the base profile/application working directory using a command-line argument, use:
 
 .. code-block:: ini
 
@@ -497,6 +1031,10 @@ or, for the binary version:
 .. code-block:: ini
 
    pygpt.exe --workdir="/path/to/workdir"
+
+This command-line option changes the whole profile/application workdir. It is
+different from a project's custom data workdir, which overrides only the
+logical ``data`` directory for conversations in that project.
    
 
 Translations / locale
@@ -518,19 +1056,31 @@ create and save the file with the appropriate name, for example:
 
 This will add Spanish as a selectable language in the application's language menu.
 
-**Overwriting CSS and locales with Your Own Files:**
+**Overwriting locales and adding custom CSS themes:**
 
-You can also overwrite files in the ``locale`` and ``css`` app directories with your own files in the user directory. 
-This allows you to overwrite language files or CSS styles in a very simple way - by just creating files in your working directory.
+There are two customization scopes in addition to bundled resources:
 
+* application-wide overrides under ``<application base workdir>/locale`` and ``<application base workdir>/css``;
+* active-profile overrides under ``<profile workdir>/locale`` and ``<profile workdir>/css``.
 
-.. code-block:: ini
+Static Add-ons are also application-wide and are read directly from:
 
-   {HOME_DIR}/.config/pygpt-net/
+* ``<application base workdir>/addons/locale/<id>/[locale/]``;
+* ``<application base workdir>/addons/themes/<id>/[theme/]``.
 
+Theme and Locale Add-ons are not copied into profile workdirs. For locale data, the effective load order is bundled locale -> application-base ``locale`` -> Locale Add-ons -> active-profile ``locale``. For theme assets, the effective order is bundled theme -> application-base ``css`` -> Theme Add-on -> active-profile ``css``.
 
-* `locale` - a directory for locales in ``.ini`` format.
-* `css` - a directory for CSS styles
+Theme CSS uses a directory-per-theme layout. For new custom themes, use a ``-dark`` or
+``-light`` suffix to declare the runtime compatibility type, for example
+``<application base workdir>/css/my_custom-dark/`` or ``<profile workdir>/css/paper-light/``. The suffix stays in the stored
+theme ID but is omitted from the normal menu title, so these are displayed as **My Custom** and
+**Paper**. If both Dark and Light variants with the same base name are installed, the menu shows
+**(Dark)** / **(Light)** to distinguish them. Unsuffixed new custom IDs default to Dark. A custom
+directory with the same ID as a built-in theme, such as ``<application base workdir>/css/ocean/`` or ``<profile workdir>/css/ocean/``, overrides/extends
+that bundled theme and keeps its built-in compatibility type.
+
+See ``Extending PyGPT -> Custom themes and styles`` for the complete directory layout, load order,
+Wide chat overrides and ``app.xml`` behavior.
 
 **Adding Your Own Fonts**
 
@@ -557,12 +1107,14 @@ You can see the list of loaded fonts in ``Debug / Config``.
        font-family: 'MyFont';
    }}
 
+.. _configuration-data-loaders:
+
 Data Loaders
 ------------
 
 **Configuring data loaders**
 
-In the ``Settings -> LlamaIndex -> Data loaders`` section you can define the additional keyword arguments to pass into data loader instance.
+In the ``Settings -> Indexes / RAG -> Data loaders`` section you can define the additional keyword arguments to pass into data loader instance.
 
 In most cases, an internal LlamaIndex loaders are used internally. 
 You can check these base loaders e.g. here:
@@ -572,7 +1124,7 @@ Files loaders: https://github.com/run-llama/llama_index/tree/main/llama-index-in
 Web loaders: https://github.com/run-llama/llama_index/tree/main/llama-index-integrations/readers/llama-index-readers-web
 
 .. tip::
-   To index an external data or data from the Web just ask for it, by using ``Web Search`` plugin, e.g. you can ask the model with ``Please index the youtube video: URL to video``, etc. Data loader for a specified content will be choosen automatically.
+   To index an external data or data from the Web just ask for it, by using ``Web search`` plugin, e.g. you can ask the model with ``Please index the youtube video: URL to video``, etc. The data loader for the specified content will be chosen automatically.
 
 Allowed additional keyword arguments for built-in data loaders (files):
 
@@ -589,19 +1141,24 @@ Allowed additional keyword arguments for built-in data loaders (files):
 **Image (vision)**  (file_image_vision)
 
 This loader can operate in two modes: local model and API.
-If the local mode is enabled, then the local model will be used. The local mode requires a Python/PyPi version of the application and is not available in the compiled or Snap versions.
-If the API mode (default) is selected, then the OpenAI API and the standard vision model will be used. 
+
+If local mode is enabled, a local vision model is used. Local mode requires the Python/PyPi version of
+the application and is not available in compiled or Snap versions.
+
+If API mode (default) is selected, the loader uses the image model configured in
+``Plugins -> Settings -> RAG (inline) -> Image model`` (default: ``gpt-4o``).
 
 .. note::
-   Usage of API mode consumes additional tokens in OpenAI API (for ``GPT-4 Vision`` model)!
+   API mode sends the image to the configured API model and may incur provider/API usage costs.
 
-Local mode requires ``torch``, ``transformers``, ``sentencepiece`` and ``Pillow`` to be installed and uses the ``Salesforce/blip2-opt-2.7b`` model to describing images.
+Local mode requires ``torch``, ``transformers``, ``sentencepiece`` and ``Pillow`` and uses
+``Salesforce/blip2-opt-2.7b`` to describe images.
 
 * ``keep_image`` - bool, default: ``False``
 * ``local_prompt`` - str, default: ``Question: describe what you see in this image. Answer:``
-* ``api_prompt`` - str, default: ``Describe what you see in this image`` - Prompt to use in API
-* ``api_model`` - str, default: ``gpt-4-vision-preview`` - Model to use in API
-* ``api_tokens`` - int, default: ``1000`` - Max output tokens in API
+* ``api_prompt`` - str, default: ``Describe what is visible in the image, do it as accurately as possible, including a comprehensive description of all details`` - Prompt used in API mode
+* ``api_model`` - str, default: ``gpt-4o`` - Fallback API model; inside PyGPT this is set from the plugin's ``Image model`` option
+* ``api_tokens`` - int, default: ``1000`` - Max output tokens in API mode
 
 **IPYNB Notebook files** (file_ipynb)
 
@@ -619,15 +1176,21 @@ Local mode requires ``torch``, ``transformers``, ``sentencepiece`` and ``Pillow`
 
 **Video/Audio**  (file_video_audio)
 
-This loader can operate in two modes: local model and API.
-If the local mode is enabled, then the local ``Whisper`` model will be used. The local mode requires a Python/PyPi version of the application and is not available in the compiled or Snap versions.
-If the API mode (default) is selected, then the currently selected provider in ``Audio Input`` plugin will be used. If the ``OpenAI Whisper`` is chosen then the OpenAI API and the API Whisper model will be used. 
+This loader can operate in two modes: local model and provider-based transcription.
 
-**Note:** Usage of Whisper via API consumes additional tokens in OpenAI API (for ``Whisper`` model)!
+If local mode is enabled, the local ``Whisper`` model is used. Local mode requires the Python/PyPi
+version of the application and is not available in compiled or Snap versions.
 
-Local mode requires ``torch`` and ``openai-whisper`` to be installed and uses the ``Whisper`` model locally to transcribing video and audio.
+If local mode is disabled (default), transcription is delegated to the provider currently configured in
+the ``Audio input`` plugin. For example, when ``Whisper (via OpenAI API)`` is selected there, the loader
+uses that provider and its configured model.
 
-* ``model_version`` - str, default: ``base`` - Whisper model to use, available models: https://github.com/openai/whisper
+.. note::
+   Provider-based transcription may incur API usage costs depending on the selected ``Audio input`` provider.
+
+Local mode requires ``torch`` and ``openai-whisper`` and uses the local Whisper model.
+
+* ``model_version`` - str, default: ``base`` - Local Whisper model to use; available models: https://github.com/openai/whisper
 
 **XML files** (file_xml)
 
@@ -734,12 +1297,12 @@ Vector stores
 
 * ChromaVectorStore
 * ElasticsearchStore
-* PinecodeVectorStore
+* PineconeVectorStore
 * QdrantVectorStore
 * RedisVectorStore
 * SimpleVectorStore
 
-You can configure selected vector store by providing config options like ``api_key``, etc. in ``Settings -> LlamaIndex`` window. 
+You can configure selected vector store by providing config options like ``api_key``, etc. in ``Settings -> Indexes / RAG -> Vector Store``. 
 
 Arguments provided here (on list: ``Vector Store (**kwargs)`` in ``Advanced settings`` will be passed to selected vector store provider. You can check keyword arguments needed by selected provider on LlamaIndex API reference page: 
 
@@ -758,7 +1321,7 @@ Keyword arguments for ElasticsearchStore(``**kwargs``):
 * any other keyword arguments provided on list
 
 
-**PinecodeVectorStore**
+**PineconeVectorStore**
 
 Keyword arguments for Pinecone(``**kwargs``):
 
@@ -784,8 +1347,7 @@ Keyword arguments for RedisVectorStore(``**kwargs``):
 
 You can extend list of available providers by creating custom provider and registering it on app launch.
 
-By default, you are using chat-based mode when using ``Chat with Files``.
-If you want to only query index (without chat) you can enable ``Query index only (without chat)`` option.
+Use ``Settings -> Indexes / RAG -> Chat -> RAG mode`` to choose between normal RAG-backed Chat, querying the index only, or retrieval only.
 
 
 **Adding custom vector stores and offline data loaders**

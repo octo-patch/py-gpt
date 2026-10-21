@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.10 00:00:00                  #
+# Updated Date: 2026.09.05 12:30:00                  #
 # ================================================== #
 import os
 import json
@@ -31,7 +31,7 @@ class FakeCoreCtx:
         return self.first_item
 
 class FakeFilesystem:
-    def extract_local_url(self, url):
+    def extract_local_url(self, url, ctx=None):
         return (url, "/local" + url)
 
 class FakeMarkdown:
@@ -79,10 +79,17 @@ def body_instance(fake_window):
     return b
 
 def test_is_timestamp_enabled():
-    config_data = {"app_path": "/fake/app", "output_timestamp": True}
+    config_data = {"app_path": "/fake/app", "output_timestamp": True, "render.plain": True}
     win = FakeWindow(config_data)
     b = Body(win)
     assert b.is_timestamp_enabled() is True
+
+    config_data["render.plain"] = False
+    win = FakeWindow(config_data)
+    b = Body(win)
+    assert b.is_timestamp_enabled() is False
+
+    config_data["render.plain"] = True
     config_data["output_timestamp"] = False
     win = FakeWindow(config_data)
     b = Body(win)
@@ -93,6 +100,7 @@ def test_prepare_styles():
     win = FakeWindow(config_data)
     b = Body(win)
     b.highlight.get_style_defs = lambda: "dummy-style"
+    b.highlight.get_style = lambda: config_data["render.code_syntax"]
     style = b.prepare_styles()
     assert "dummy-style" in style
     assert "pre { color: #fff; }" in style
@@ -101,6 +109,7 @@ def test_prepare_styles():
     win = FakeWindow(config_data)
     b = Body(win)
     b.highlight.get_style_defs = lambda: "dummy-style"
+    b.highlight.get_style = lambda: config_data["render.code_syntax"]
     style = b.prepare_styles()
     assert "pre { color: #000; }" in style
 
@@ -120,12 +129,14 @@ def test_get_action_icons():
     b = Body(win)
     ctx = FakeCtxItem("123", output="value")
     icons = b.get_action_icons(ctx, all=False)
-    assert len(icons) == 5
+    assert len(icons) == 4
+    assert not any("extra-edit:" in icon for icon in icons)
     win = FakeWindow(config_data, first_item=False)
     b = Body(win)
     ctx = FakeCtxItem("123", output="value")
     icons = b.get_action_icons(ctx, all=False)
-    assert len(icons) == 6
+    assert len(icons) == 4
+    assert not any("extra-edit:" in icon for icon in icons)
 
 def test_get_icon():
     config_data = {"app_path": "/fake/app"}
@@ -146,6 +157,41 @@ def test_get_image_html():
     html = b.get_image_html(url, 1, 2)
     assert 'extra-src-img-box' in html
     assert 'img.png' in html
+    assert '>img.png<' not in html
+
+
+def test_get_video_html_uses_file_url_for_source(monkeypatch):
+    config_data = {"app_path": "/fake/app"}
+    win = FakeWindow(config_data)
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    win.core.filesystem.extract_local_url = lambda _, ctx=None: (
+        "file:///tmp/video/test.mp4",
+        "/tmp/video/test.mp4",
+    )
+    b = Body(win)
+    html = b.get_image_html("/tmp/video/test.mp4")
+    assert '<source src="file:///tmp/video/test.mp4" type="video/mp4">' in html
+    assert 'bridge://play_video/' not in html
+    assert '>test.mp4<' not in html
+
+
+def test_build_extras_dicts_uses_browser_url_for_media_path(monkeypatch):
+    config_data = {"app_path": "/fake/app"}
+    win = FakeWindow(config_data)
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    file_url = "file:///tmp/video/test.mp4"
+    native_path = "/tmp/video/test.mp4"
+    win.core.filesystem.extract_local_url = lambda _, ctx=None: (file_url, native_path)
+    b = Body(win)
+    ctx = CtxItem()
+    ctx.images = [native_path]
+
+    images, files, urls, actions = b.build_extras_dicts(ctx, 0)
+
+    assert images["1"]["url"] == file_url
+    assert images["1"]["path"] == file_url
+    assert images["1"]["basename"] == "test.mp4"
+    assert images["1"]["is_video"] is True
 
 def test_get_url_html():
     config_data = {"app_path": "/fake/app"}
@@ -157,11 +203,74 @@ def test_get_url_html():
     assert f'href="{url}"' in html
     assert "[1]" in html
 
+
+def test_get_collapsible_extra_rows_html_within_limit(body_instance):
+    rows = [f"<row>{i}</row>" for i in range(1, Body.EXTRA_ITEMS_VISIBLE_LIMIT + 1)]
+
+    html = body_instance.get_collapsible_extra_rows_html(rows)
+
+    assert 'class="extra-items-list"' in html
+    assert 'class="extra-items-hidden"' not in html
+    assert 'class="extra-items-toggle"' not in html
+    for row in rows:
+        assert row in html
+
+
+def test_get_collapsible_extra_rows_html_over_limit(body_instance, monkeypatch):
+    limit = int(body_instance.EXTRA_ITEMS_VISIBLE_LIMIT)
+    assert limit > 0
+
+    rows = [f"<row>{i}</row>" for i in range(1, limit + 3)]
+    monkeypatch.setattr(
+        "pygpt_net.core.render.web.body.trans",
+        lambda key: {
+            "ctx.extra.more_items": "+ {count} more items",
+            "ctx.extra.expand": "Expand",
+        }.get(key, key),
+    )
+
+    html = body_instance.get_collapsible_extra_rows_html(rows)
+
+    assert 'class="extra-items-visible"' in html
+    assert 'class="extra-items-hidden" style="display:none"' in html
+    assert 'class="extra-items-toggle"' in html
+    assert 'onclick="toggleExtraItems(this);"' in html
+    assert 'aria-expanded="false"' in html
+    assert 'title="Expand"' in html
+    assert '<span class="extra-items-toggle-label">+ 2 more items</span>' in html
+    assert 'class="extra-items-toggle-arrow"' in html
+    assert 'expand.svg' in html
+
+    visible_html, hidden_html = html.split(
+        '<div class="extra-items-hidden" style="display:none">', 1
+    )
+    for i in range(1, limit + 1):
+        assert f"<row>{i}</row>" in visible_html
+    for i in range(limit + 1, limit + 3):
+        assert f"<row>{i}</row>" not in visible_html
+        assert f"<row>{i}</row>" in hidden_html
+
+
+def test_get_collapsible_extra_rows_html_non_positive_limit_disables_collapse(
+        body_instance,
+        monkeypatch,
+):
+    monkeypatch.setattr(body_instance, "EXTRA_ITEMS_VISIBLE_LIMIT", 0)
+    rows = [f"<row>{i}</row>" for i in range(1, 8)]
+
+    html = body_instance.get_collapsible_extra_rows_html(rows)
+
+    assert 'class="extra-items-list"' in html
+    assert 'class="extra-items-hidden"' not in html
+    assert 'class="extra-items-toggle"' not in html
+    for row in rows:
+        assert row in html
+
 def test_get_docs_html():
     config_data = {"app_path": "/fake/app"}
     win = FakeWindow(config_data)
     b = Body(win)
-    docs = [{"uuid1": {"file_path": "path1", "file_name": "name1", "file_type": "text/plain", "file_size": 28, "creation_date": "2024-03-03", "last_modified_date": "2024-03-03", "last_accessed_date": "2024-03-03"}}]
+    docs = [{"uuid1": {"file_path": "path1", "file_name": "name1", "file_type": "text/plain", "fs_file_size": 28, "creation_date": "2024-03-03", "last_modified_date": "2024-03-03", "last_accessed_date": "2024-03-03"}}]
     html = b.get_docs_html(docs)
     assert "db.svg" in html
     assert "uuid1" in html
@@ -173,7 +282,7 @@ def test_get_file_html():
     b = Body(win)
     url = "http://example.com/file.txt"
     html = b.get_file_html(url, 1, 2)
-    assert "attachments.svg" in html
+    assert "qrc:///filetypes/txt.svg" in html
     assert f'href="{url}"' in html
 
 def test_prepare_tool_extra_plugin():
@@ -211,3 +320,74 @@ def test_get_all_tips():
 def test_get_html(body_instance):
     html = body_instance.get_html(0)
     assert html.strip().startswith("<!DOCTYPE html>")
+    assert f"window.EXTRA_ITEMS_VISIBLE_LIMIT={Body.EXTRA_ITEMS_VISIBLE_LIMIT};" in html
+    assert "window.LOCALE_MORE_ITEMS=" in html
+
+def test_attachment_origin_routes_user_and_legacy_output():
+    from pygpt_net.item.render_attachment import AttachmentPath
+    body = Body(FakeWindow({}))
+    ctx = CtxItem()
+    ctx.images = [AttachmentPath('/user.png', 'user'), '/legacy.png']
+    ctx.files = [AttachmentPath('/user.pdf', 'user'), '/legacy.txt',
+                 {'path': '/result.py', 'type': 'output'}]
+    images, files, _, _ = body.build_extras_dicts(ctx, 0)
+    assert [i['basename'] for i in images.values()] == ['legacy.png']
+    assert [i['basename'] for i in files.values()] == ['legacy.txt', 'result.py']
+    images, files, urls, actions = body.build_extras_dicts(ctx, 0, origin='user')
+    assert [i['basename'] for i in images.values()] == ['user.png']
+    assert [i['basename'] for i in files.values()] == ['user.pdf']
+    assert files['1']['icon_url'] == 'qrc:///filetypes/pdf.svg'
+    assert urls == {} and actions == {'actions': []}
+    assert body.filetype_icon_url('/no.unknown_extension') == 'qrc:///filetypes/default.svg'
+
+
+def test_user_attachments_remain_visible_during_agent_stream():
+    from pygpt_net.item.render_attachment import AttachmentPath
+    from pygpt_net.core.types import MODE_AGENT_V2
+    body = Body(FakeWindow({}))
+    ctx = CtxItem()
+    ctx.mode = MODE_AGENT_V2
+    ctx.current = True
+    ctx.files = [AttachmentPath('/user.txt', 'user'), '/result.txt']
+    assert body.build_extras_dicts(ctx, 0)[1] == {}
+    assert body.build_extras_dicts(ctx, 0, origin='user')[1]['1']['basename'] == 'user.txt'
+
+
+def test_live_input_snapshot_has_pending_attachments_before_provider_response():
+    from types import SimpleNamespace
+    from pygpt_net.item.attachment import AttachmentItem
+    from pygpt_net.core.render.web.parts.messages import Messages
+    win = FakeWindow({})
+    pending = {
+        'image': AttachmentItem(path='/pending.png', name='pending.png'),
+        'file': AttachmentItem(path='/pending.pdf', name='pending.pdf'),
+    }
+    win.core.attachments = SimpleNamespace(get_all=lambda mode: pending)
+    win.core.filesystem.types = SimpleNamespace(is_image=lambda path: path.endswith('.png'))
+    renderer = SimpleNamespace(window=win, body=Body(win), state=SimpleNamespace())
+    ctx = CtxItem()
+    ctx.files = ['/pending.png']
+    snapshot = Messages(renderer).input_attachment_snapshot(ctx, 0)
+    assert snapshot['images']['1']['basename'] == 'pending.png'
+    assert snapshot['files']['1']['basename'] == 'pending.pdf'
+    assert snapshot['files']['1']['icon_url'] == 'qrc:///filetypes/pdf.svg'
+    assert ctx.images == []
+    assert ctx.files == ['/pending.png']
+
+
+def test_connection_snapshot_renders_pending_and_restored_web_source():
+    from types import SimpleNamespace
+    from pygpt_net.item.attachment import AttachmentItem
+    from pygpt_net.core.render.web.parts.messages import Messages
+    win = FakeWindow({})
+    renderer = SimpleNamespace(window=win, state=SimpleNamespace())
+    ctx = CtxItem()
+    url = 'https://www.youtube.com/watch?v=F3uvhqiKrcI'
+    extra = {'loader': 'youtube', 'loader_name': 'YouTube', 'loader_icon': ':/icons/language.svg'}
+    pending = AttachmentItem(path=url, name=url, type='url', extra=extra)
+    messages = Messages(renderer)
+    result = messages.connection_snapshot(ctx, [pending])
+    assert result['1'] == {'name': 'YouTube', 'address': url, 'url': url, 'icon_url': 'qrc:///icons/language.svg'}
+    ctx.additional_ctx = [dict(extra, type='url', path=url)]
+    assert messages.connection_snapshot(ctx) == result
+    assert messages.connection_snapshot(ctx, [pending]) == result

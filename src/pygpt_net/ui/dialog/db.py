@@ -255,10 +255,13 @@ class DataBrowser(QWidget):
         self.search_column_select.view().setMinimumWidth(200)
 
         # buttons
-        self.refresh_button = QPushButton(trans("db.refresh"))
+        self.refresh_button = QPushButton(QIcon(":/icons/reload.svg"), "")
+        self.refresh_button.setToolTip(trans("db.refresh"))
         self.refresh_button.clicked.connect(self.force_refresh)
-        self.prev_button = QPushButton(trans("db.prev"))
-        self.next_button = QPushButton(trans("db.next"))
+        self.prev_button = QPushButton(QIcon(":/icons/back.svg"), "")
+        self.prev_button.setToolTip(trans("db.prev"))
+        self.next_button = QPushButton(QIcon(":/icons/forward.svg"), "")
+        self.next_button.setToolTip(trans("db.next"))
         self.limit_input = QLineEdit("100")
         self.limit_input.setFixedWidth(80)
         self.limit_input.editingFinished.connect(self.on_limit_change)
@@ -268,8 +271,6 @@ class DataBrowser(QWidget):
         # pagination
         self.page_input = QLineEdit("1")
         self.page_input.setFixedWidth(80)
-        self.page_input_label = QLabel(trans("db.page") + ":")
-        self.page_input_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.page_input.editingFinished.connect(self.on_page_input_change)
         self.page_info_label = QLabel(" / 1")
         self.page_info_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -322,9 +323,6 @@ class DataBrowser(QWidget):
         self.prev_button.clicked.connect(self.prev_page)
         self.next_button.clicked.connect(self.next_page)
 
-        self.table_select.setCurrentText(self.get_default_table())
-        self.on_table_select_changed()
-
         # setup layouts
         if not self.is_inline():
             top_layout.addWidget(QLabel(trans("db.table")))
@@ -332,16 +330,8 @@ class DataBrowser(QWidget):
         top_layout.addWidget(QLabel(trans("db.sort") + ":"))
         top_layout.addWidget(self.sort_by_select)
 
-        if not self.is_inline():
-            top_layout.addWidget(QLabel(trans("db.order") + ":"))
         top_layout.addWidget(self.sort_order_select)
-
-        if not self.is_inline():
-            top_layout.addWidget(QLabel(trans("db.search") + ":"))
         top_layout.addWidget(self.search_input)
-
-        if not self.is_inline():
-            top_layout.addWidget(QLabel(trans("db.search_in") + ":"))
         top_layout.addWidget(self.search_column_select)
         #top_layout.addWidget(self.refresh_button)
 
@@ -359,7 +349,6 @@ class DataBrowser(QWidget):
             # separator
             bottom_layout_right.addWidget(QLabel("|"))
 
-        bottom_layout_right.addWidget(self.page_input_label)
         bottom_layout_right.addWidget(self.page_input)
         bottom_layout_right.addWidget(self.page_info_label)
         bottom_layout_right.addWidget(self.limit_label)
@@ -377,6 +366,11 @@ class DataBrowser(QWidget):
             main_layout.addWidget(self.db_path_label)  # db path
 
         self.setLayout(main_layout)
+
+        # Pagination updates can show the navigation buttons. Initialize the
+        # selection only after the layout has parented them to this browser.
+        self.table_select.setCurrentText(self.get_default_table())
+        self.on_table_select_changed()
 
         view = self.get_list_widget()
 
@@ -626,6 +620,12 @@ class DataBrowser(QWidget):
 
         current_page = self.current_offset // limit + 1
         self.page_input.setText(str(current_page))
+
+        # Pagination controls must always remain visible. Availability only
+        # affects whether a button is enabled; it must never remove the
+        # control from the layout when there is no previous/next page.
+        self.prev_button.setVisible(True)
+        self.next_button.setVisible(True)
         self.prev_button.setEnabled(self.current_offset > 0)
         self.next_button.setEnabled(self.current_offset + limit < total_rows)
 

@@ -6,13 +6,11 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.31 16:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QRect
-
-from pygpt_net.utils import trans
 
 
 class Layout:
@@ -30,8 +28,6 @@ class Layout:
             "toolbox",
             "toolbox.mode",
             "calendar",
-            "interpreter",
-            "interpreter.columns",
             "columns",
         ]
         self.text_nodes = ["input", "input_extra"]
@@ -45,6 +41,7 @@ class Layout:
         self.text_nodes_restore()
         self.state_restore()
         self.splitters_restore()
+        self.window.controller.toolbar.restore_toolbox_state()
         #  self.tabs_restore()
         self.groups_restore()
         self.scroll_restore()
@@ -76,7 +73,12 @@ class Layout:
             if widget is None:
                 continue
             try:
-                widget.setText(value)
+                if hasattr(widget, "set_mention_text"):
+                    widget.set_mention_text(value)
+                elif hasattr(widget, "setText"):
+                    widget.setText(value)
+                else:
+                    widget.setPlainText(value)
             except Exception as e:
                 print("Error while restoring field state: " + str(e))
                 self.window.core.debug.log(e)
@@ -89,7 +91,10 @@ class Layout:
             widget = ui_nodes.get(node_id)
             if widget is None:
                 continue
-            data[node_id] = widget.toPlainText()
+            if hasattr(widget, "serialize_mentions"):
+                data[node_id] = widget.serialize_mentions()
+            else:
+                data[node_id] = widget.toPlainText()
         self.window.core.config.set('layout.text_nodes', data)
 
     def tabs_save(self):
@@ -131,20 +136,49 @@ class Layout:
                 self.window.core.debug.log(e)
 
     def splitters_save(self):
-        """Save splitters state"""
+        """Save splitters state.
+
+        ``main.output`` has a transient footer-only geometry while a non-chat
+        tab hides the Chat composer. Persist the last real Chat geometry instead
+        so restarting on Notepad/Files/etc. cannot permanently collapse input.
+        """
+        config = self.window.core.config
+        previous = config.get('layout.splitters', {}) if config.has('layout.splitters') else {}
+        if not isinstance(previous, dict):
+            previous = {}
         data = {}
         ui_splitters = self.window.ui.splitters
         for splitter in self.splitters:
-            if splitter == "calendar" and not self.window.controller.notepad.opened_once:
+            if splitter == "calendar" and not self.window.tools.get("notepad").tabs.opened_once:
                 continue
             splitter_widget = ui_splitters.get(splitter)
             if splitter_widget is None:
                 continue
+            if splitter == 'toolbox' and hasattr(splitter_widget, 'restore_proportions'):
+                splitter_widget.restore_proportions()
+                continue
             try:
+                if splitter == "main.output":
+                    tabs = getattr(self.window.controller.ui, 'tabs', None)
+                    if tabs is not None and getattr(tabs, '_chat_input_suppressed', False):
+                        remembered = tabs.get_chat_input_splitter_sizes_for_save()
+                        if remembered is not None:
+                            data[splitter] = remembered
+                            continue
+                        if splitter in previous:
+                            data[splitter] = previous[splitter]
+                            continue
                 data[splitter] = splitter_widget.sizes()
+                if splitter == 'main':
+                    from pygpt_net.ui.layout.sidebar import pane_order, placement
+                    toolbox_width = data[splitter][pane_order(placement(config)).index('toolbox')]
+                    if toolbox_width > 0:
+                        config.set('layout.toolbox.width', toolbox_width)
             except Exception:
                 pass
-        self.window.core.config.set('layout.splitters', data)
+        config.set('layout.splitters', data)
+        from pygpt_net.ui.layout.sidebar import order_name, placement
+        config.set('layout.main.order', order_name(placement(config)))
 
     def splitters_restore(self):
         """Restore splitters state"""
@@ -158,9 +192,23 @@ class Layout:
             if splitter_widget is None:
                 continue
             try:
+                if splitter == 'main' and len(sizes) == 3:
+                    from pygpt_net.ui.layout.sidebar import pane_sizes, placement
+                    saved_order = config.get('layout.main.order')
+                    if saved_order == 'toolbox-first':
+                        toolbox, contexts, chat = sizes
+                    elif saved_order == 'toolbox-right':
+                        contexts, chat, toolbox = sizes
+                    else:
+                        contexts, toolbox, chat = sizes
+                    sizes = pane_sizes(0, contexts, chat + toolbox, placement(config))
                 current = splitter_widget.sizes()
                 if current != sizes:
                     splitter_widget.setSizes(sizes)
+                if splitter == "main.output":
+                    tabs = getattr(self.window.controller.ui, 'tabs', None)
+                    if tabs is not None:
+                        tabs.remember_restored_chat_input_splitter_sizes(list(splitter_widget.sizes()))
             except Exception as e:
                 print("Error while restoring splitter state: " + str(e))
                 self.window.core.debug.log(e)
@@ -191,7 +239,7 @@ class Layout:
         if output is not None and hasattr(output, 'verticalScrollBar'):
             data['output'] = output.verticalScrollBar().value()
 
-        for nid, notepad in self.window.ui.notepad.items():
+        for nid, notepad in self.window.tools.get("notepad").documents.widgets.items():
             try:
                 scroll_id = f"notepad.{nid}"
                 data[scroll_id] = notepad.textarea.verticalScrollBar().value()
@@ -205,7 +253,7 @@ class Layout:
         if not config.has('layout.scroll'):
             return
         data = config.get('layout.scroll')
-        notepads = self.window.ui.notepad
+        notepads = self.window.tools.get("notepad").documents.widgets
         for scroll_id, value in data.items():
             if scroll_id.startswith("notepad."):
                 try:
@@ -236,6 +284,11 @@ class Layout:
     def state_restore(self):
         """Restore window state"""
         config = self.window.core.config
+        # The first launch deliberately establishes its own centered normal
+        # geometry and starts maximized. Do not let stale/default layout data
+        # override that before the license has been accepted.
+        if not bool(config.get('license.accepted')):
+            return
         if not config.has('layout.window'):
             return
         data = config.get('layout.window')
@@ -269,14 +322,19 @@ class Layout:
     def state_save(self):
         """Save window state"""
         data = {}
-        geometry = self.window.geometry()
+        fullscreen = self.window.isFullScreen()
+        geometry = self.window.normalGeometry() if (fullscreen or self.window.isMaximized()) else self.window.geometry()
         data['geometry'] = {
             'x': geometry.x(),
             'y': geometry.y(),
             'width': geometry.width(),
             'height': geometry.height(),
         }
-        data['maximized'] = self.window.isMaximized()
+        data['maximized'] = (
+            self.window._fullscreen_restore_maximized
+            if fullscreen
+            else self.window.isMaximized()
+        )
         self.window.core.config.set('layout.window', data)
 
         # ------------------
@@ -325,38 +383,6 @@ class Layout:
             except Exception as e:
                 print("Error while restoring group state: " + str(e))
                 self.window.core.debug.log(e)
-
-    def restore_default_css(self, force: bool = False):
-        """
-        Restore app CSS to default
-
-        :param force: Force restore
-        """
-        if not force:
-            self.window.ui.dialogs.confirm(
-                type='restore.css',
-                id=0,
-                msg=trans('dialog.css.restore.confirm'),
-            )
-            return
-
-        # restore css
-        self.window.core.debug.info("Restoring CSS...")
-        self.window.core.filesystem.backup_custom_css()
-        self.window.core.filesystem.install_css(force=True)
-        self.window.core.debug.info("CSS restored.")
-
-        # update editor if opened
-        current_file = self.window.ui.dialog['config.editor'].file
-        if current_file is not None:
-            if current_file.endswith('.css') and self.window.core.settings.active['editor']:
-                self.window.core.settings.load_editor(current_file)
-
-        # show success message
-        self.window.ui.dialogs.alert(trans('dialog.css.restore.confirm.success'))
-        self.window.core.debug.info("Reloading theme...")
-        self.window.controller.theme.reload(force=True)  # reload theme
-        self.window.core.debug.info("Theme reloaded.")
 
     def reload(self):
         """Reload layout"""

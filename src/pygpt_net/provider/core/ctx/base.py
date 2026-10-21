@@ -14,6 +14,8 @@ from typing import List, Dict, Optional
 from packaging.version import Version
 
 from pygpt_net.item.ctx import CtxMeta, CtxItem, CtxGroup
+from pygpt_net.item.ctx_part import CtxItemPart
+from pygpt_net.item.ctx_part_task import CtxItemPartTask
 
 
 class BaseProvider:
@@ -36,6 +38,18 @@ class BaseProvider:
 
     def update_item(self, item: CtxItem) -> bool:
         pass
+
+    def append_part(self, part: CtxItemPart) -> bool:
+        return False
+
+    def update_part(self, part: CtxItemPart) -> bool:
+        return False
+
+    def append_part_task(self, task: CtxItemPartTask) -> bool:
+        return False
+
+    def update_part_task(self, task: CtxItemPartTask) -> bool:
+        return False
 
     def create(self, meta: CtxMeta) -> int:
         pass
@@ -69,6 +83,31 @@ class BaseProvider:
             search_content: bool = False
     ) -> Dict[int, CtxMeta]:
         pass
+
+    def count_meta(
+            self,
+            search_string: Optional[str] = None,
+            filters: Optional[dict] = None,
+            search_content: bool = False,
+    ) -> int:
+        """
+        Return number of context metadata rows matching search/filter criteria.
+
+        Providers should override this with a native count operation where
+        possible. The default implementation keeps third-party/legacy
+        providers compatible by falling back to their get_meta() result.
+        """
+        try:
+            return len(self.get_meta(
+                search_string=search_string,
+                limit=0,
+                offset=0,
+                filters=filters,
+                search_content=search_content,
+            ))
+        except TypeError:
+            # Older providers may expose the legacy get_meta signature.
+            return len(self.get_meta(search_string=search_string))
 
     def get_meta_indexed(self) -> Dict[int, CtxMeta]:
         pass

@@ -585,6 +585,7 @@ class Worker(BaseWorker):
         """
         p = item.get("params", {}) or {}
         local = self.prepare_path(p.get("path") or "")
+        self.security_read(local)
         if not os.path.exists(local):
             return self.make_response(item, f"Local file not found: {local}")
 
@@ -630,10 +631,10 @@ class Worker(BaseWorker):
 
     def prepare_path(self, path: str) -> str:
         if path in [".", "./"]:
-            return self.plugin.window.core.config.get_user_dir("data")
+            return self.get_workdir()
         if self.is_absolute_path(path):
             return path
-        return os.path.join(self.plugin.window.core.config.get_user_dir("data"), path)
+        return os.path.join(self.get_workdir(), path)
 
     def is_absolute_path(self, path: str) -> bool:
         return os.path.isabs(path)

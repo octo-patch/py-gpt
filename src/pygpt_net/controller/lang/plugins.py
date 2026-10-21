@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.15 23:00:00                  #
+# Updated Date: 2026.09.20 12:45:00
 # ================================================== #
 
 from pygpt_net.utils import trans
@@ -24,9 +24,6 @@ class Plugins:
     def apply(self):
         """Apply locale to plugins"""
 
-        # plugins: info
-        self.window.controller.plugins.update_info()
-
         plugins_dict = self.window.core.plugins.plugins
         plugin_ids = tuple(plugins_dict.keys())
         win = self.window
@@ -42,14 +39,26 @@ class Plugins:
             plugin = plugins_dict[plugin_id]
             if not plugin.use_locale:
                 continue
-            domain = f'plugin.{plugin_id}'
+            domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else f'plugin.{plugin_id}'
             trans('', True, domain)
 
         for plugin_id in plugin_ids:
             plugin = plugins_dict[plugin_id]
+
+            # Tool widgets contain generic labels from the main locale domain,
+            # so refresh them for every plugin, not only localized plugins.
+            parent_id = f'plugin.{plugin_id}'
+            cfg_plugin = ui_config.get(parent_id, {})
+            for option_id, option in plugin.setup().items():
+                if option.get('type') != 'cmd' or option_id not in cfg_plugin:
+                    continue
+                widget = cfg_plugin[option_id]
+                if hasattr(widget, 'update_locale'):
+                    widget.update_locale()
+
             if not plugin.use_locale:
                 continue
-            domain = f'plugin.{plugin_id}'
+            domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else f'plugin.{plugin_id}'
 
             name_txt = trans('plugin.name', False, domain)
 
@@ -57,34 +66,50 @@ class Plugins:
             if plugin_settings_desc_key in ui_nodes:
                 desc_txt = trans('plugin.description', False, domain)
                 ui_nodes[plugin_settings_desc_key].setText(desc_txt)
+                ui_nodes[plugin_settings_desc_key].setToolTip(desc_txt)
 
             tab_idx = ctrl_plugins.get_tab_idx(plugin_id)
             if tab_idx is not None:
                 settings_tab.setTabText(tab_idx, name_txt)
 
             if plugin_id in ui_menu_plugins:
+                desc_txt = trans('plugin.description', False, domain)
                 ui_menu_plugins[plugin_id].setText(name_txt)
+                ui_menu_plugins[plugin_id].setToolTip(desc_txt)
 
             options = plugin.setup()
             if not options:
                 continue
 
-            cfg_domain = ui_config.get(domain)
+            cfg_domain = ui_config.get(f'plugin.{plugin_id}')
             for option_id, option in options.items():
+                # Command widgets localize their own generic labels and
+                # plugin-specific descriptions in update_locale().
+                if option.get('type') == 'cmd':
+                    continue
+
                 label_key = f'plugin.{plugin_id}.{option_id}.label'
                 desc_key = f'plugin.{plugin_id}.{option_id}.desc'
+
+                # Combo item captions may use global locale keys. Refresh them
+                # after a language switch without changing the stored value.
+                if option.get('type') == 'combo' and cfg_domain and option_id in cfg_domain:
+                    widget = cfg_domain[option_id]
+                    if hasattr(widget, 'update_locale'):
+                        widget.update_locale()
 
                 is_bool = option.get('type') == 'bool'
                 need_label = (label_key in ui_nodes) or (is_bool and cfg_domain and option_id in cfg_domain)
                 need_desc = desc_key in ui_nodes
 
+                option_domain = option.get('_locale_domain') or domain
                 label_str = None
                 if need_label:
-                    label_str = trans(f'{option_id}.label', False, domain)
+                    label_str = trans(f'{option_id}.label', False, option_domain)
 
                 if need_desc:
-                    desc_str = trans(f'{option_id}.description', False, domain)
-                    tooltip_str = trans(f'{option_id}.tooltip', False, domain)
+                    desc_str = trans(f'{option_id}.description', False, option_domain)
+                    tooltip_str = trans(f'{option_id}.tooltip', False, option_domain)
                     if tooltip_str == f'{option_id}.tooltip':
                         tooltip_str = desc_str
                     ui_nodes[desc_key].setText(desc_str)
@@ -104,3 +129,11 @@ class Plugins:
         idx = settings_tab.currentIndex()
         win.plugin_settings.update_list('plugin.list', plugins_dict)
         ctrl_plugins.set_by_tab(idx)
+
+        # Plugin names can sort differently between languages, so rebuild the
+        # two menu sections after all plugin locale domains have been reloaded.
+        ctrl_plugins.rebuild_menu()
+
+        # Refresh the enabled-plugins summary after all plugin locale domains
+        # have been reloaded, so names in its tooltip switch language live.
+        ctrl_plugins.update_info()

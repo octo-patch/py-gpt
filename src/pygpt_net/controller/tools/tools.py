@@ -6,10 +6,10 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.24 23:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QTabWidget, QMenu
@@ -26,12 +26,7 @@ class Tools:
         :param window: Window instance
         """
         self.window = window
-        self.tab_tools = {
-            'tools.files': ['files', 'folder_filled', Tab.TAB_FILES],
-            'tools.calendar': ['calendar', 'calendar', Tab.TAB_TOOL_CALENDAR],
-            'tools.notepad': ['notepad', 'paste', Tab.TAB_NOTEPAD],
-            'tools.painter': ['painter', 'brush', Tab.TAB_TOOL_PAINTER],
-        }
+        self.tab_tools = {}
 
     def setup(self):
         """Setup tools"""
@@ -41,6 +36,32 @@ class Tools:
         """Reload tools"""
         pass
 
+    def _confirm_sandbox_rebuild(self, dialog_type: str):
+        self.window.ui.dialogs.confirm(
+            type=dialog_type,
+            id="",
+            msg=trans("confirm.tools.sandbox.rebuild"),
+            modal=True,
+        )
+
+    def rebuild_ipython_docker(self, force: bool = False):
+        if not force:
+            self._confirm_sandbox_rebuild("tools.sandbox.rebuild.ipython_docker")
+            return
+        self.window.core.plugins.get("filesystem").builder.build_and_restart()
+
+    def rebuild_python_legacy_docker(self, force: bool = False):
+        if not force:
+            self._confirm_sandbox_rebuild("tools.sandbox.rebuild.python_legacy_docker")
+            return
+        self.window.core.plugins.get("filesystem").docker.build_and_restart()
+
+    def rebuild_python_builtin(self, force: bool = False):
+        if not force:
+            self._confirm_sandbox_rebuild("tools.sandbox.rebuild.python_builtin")
+            return
+        self.window.core.plugins.get("filesystem").rebuild_builtin_sandbox()
+
     def open_tab(self, type: int):
         """
         Open first tab by type
@@ -49,7 +70,7 @@ class Tools:
         """
         idx = self.window.core.tabs.get_min_idx_by_type(type)
         if idx is not None:
-            self.window.controller.ui.tabs.switch_tab_by_idx(idx)
+            self.window.controller.tabs.switch_tab_by_idx(idx)
 
     def append_tab_menu(
             self,
@@ -58,7 +79,7 @@ class Tools:
             idx: int,
             column_idx: int,
             caller: QTabWidget = None
-    ) -> QMenu:
+    ) -> Optional[QMenu]:
         """
         Append tab menu
 
@@ -67,18 +88,28 @@ class Tools:
         :param idx: tab index
         :param column_idx: column index
         :param caller: caller widget (default: None)
-        :return: tab add submenu
+        :return: tab add submenu, or None when no tools can be added
         """
-        submenu = menu.addMenu(QIcon(":/icons/add.svg"), trans("action.tab.add.tool"))
+        submenu = None
         tools = self.window.tools.get_all()
-        for id in tools:
-            tool = tools[id]
-            if not tool.has_tab:
+        if hasattr(parent, 'add_tab'):
+            caller = parent
+        available = {id: tool for id, tool in tools.items() if tool.can_add_tab()}
+        for tool in available.values():
+            hook = getattr(tool, 'get_tab_menu', None)
+            if hook is not None:
+                for action in hook(menu, idx, column_idx, caller):
+                    menu.addAction(action)
+        for id, tool in available.items():
+            if getattr(tool, 'hide_in_tab_tools', False):
                 continue
+            # Do not offer an action that cannot create anything. Single-instance
+            # tools (e.g. Canvas, Agent Workflow and Python/OS) disappear from
+            # Add tool as soon as their application-wide tab already exists.
+            if submenu is None:
+                submenu = menu.addMenu(QIcon(":/icons/add.svg"), trans("action.tab.add.tool"))
             icon = tool.tab_icon
             title = trans(tool.tab_title)
-            if hasattr(parent, 'add_tab'):
-                caller = parent
             action = QAction(QIcon(icon), title, parent)
             action.triggered.connect(
                 lambda checked=False, idx=idx, column_idx=column_idx, id=id, caller=caller: caller.add_tab(idx, column_idx, Tab.TAB_TOOL, id)

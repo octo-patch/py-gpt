@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.12.29 21:00:00                  #
+# Updated Date: 2026.08.16 14:32:00                  #
 # ================================================== #
 
 import platform
@@ -116,6 +116,14 @@ class Platforms:
                and "SNAP_NAME" in os.environ \
                and os.environ["SNAP_NAME"] == Config.SNAP_NAME
 
+    def is_flatpak(self) -> bool:
+        """
+        Return True if app is running inside Flatpak.
+
+        :return: True if app is running inside Flatpak
+        """
+        return bool(os.environ.get("FLATPAK_ID")) or os.path.exists("/.flatpak-info")
+
     def is_ms_store(self) -> bool:
         """
         Return True if app is running as Microsoft Store app
@@ -149,25 +157,34 @@ class Platforms:
             return self.get_os() + ', ' + self.get_architecture() + self.get_env_suffix()
         return self.get_os() + ', ' + self.get_architecture()
 
+    def get_app_type(self) -> str:
+        """
+        Return application distribution type.
+
+        :return: application distribution type
+        """
+        if self.is_flatpak():
+            return 'Flatpak'
+        if self.is_snap():
+            return 'snap'
+        if self.is_appimage():
+            return 'AppImage'
+        if self.window.core.config.is_compiled():
+            if self.is_windows() and self.is_ms_store():
+                return 'MS Store'
+            return 'standalone'
+        return 'source'
+
     def get_env_suffix(self) -> str:
         """
         Return platform suffix as string
 
         :return: platform as string
         """
-        suffix = ''
-        if self.is_snap():
-            suffix = ' (snap)'
-        elif self.is_appimage():
-            suffix = ' (AppImage)'
-        elif self.window.core.config.is_compiled():
-            suffix = ' (standalone)'
-            if self.is_windows():
-                if not self.is_ms_store():
-                    suffix = ' (standalone)'
-                else:
-                    suffix = ' (MS Store)'
-        return suffix
+        app_type = self.get_app_type()
+        if app_type == 'source':
+            return ''
+        return ' (' + app_type + ')'
 
     def is_svg_supported(self) -> bool:
         """Check if SVG is supported"""

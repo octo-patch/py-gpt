@@ -6,35 +6,67 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2026.01.22 14:40:00                  #
+# Updated Date: 2026.10.05 16:00:00                  #
 # ================================================== #
 
 from typing import Optional, Union, Tuple
 import math
 import os
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent
-from PySide6.QtGui import QAction, QIcon, QImage, QTextCursor
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QPoint, Property
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QTextCursor, QTextCharFormat, QTextFormat, QColor
 from PySide6.QtWidgets import (
     QTextEdit,
     QApplication,
     QPushButton,
     QWidget,
     QHBoxLayout,
+    QMenu,
 )
 
 from pygpt_net.core.events import Event
+from pygpt_net.core.tabs.tab import Tab
+from pygpt_net.ui.widget.textarea.zoom import zoom_text
 from pygpt_net.utils import trans
-from pygpt_net.core.attachments.clipboard import AttachmentDropHandler
+from pygpt_net.core.attachments.clipboard import AttachmentDropHandler, DirectoryPasteHandler
+from pygpt_net.core.text.mentions import (
+    KIND_ATTACHMENT,
+    KIND_FILE_CONTEXT,
+    KIND_CONVERSATION,
+    iter_tags as iter_mention_tags,
+    label_for as mention_label_for,
+    make_tag as make_mention_tag,
+)
+from pygpt_net.item.attachment import AttachmentItem
+from pygpt_net.ui.widget.textarea.mention import MentionEntry, MentionPopup
+from pygpt_net.ui.widget.textarea.mention_discovery import ScanSpec, WorkdirMentionDiscovery, ConversationTitleDiscovery
+from pygpt_net.ui.widget.lists.model_combo import CompactModelCombo
+
+
+# True: hide globally excluded workdir files from the @ mention picker.
+# False: show them too; send-time loading still respects the blacklist.
+WORKDIR_MENTIONS_HIDE_BLACKLISTED = True
+
+# True: [+] opens the mention/context picker with Upload file(s) selected.
+# False: [+] immediately opens the file upload dialog.
+ATTACHMENT_BUTTON_OPEN_MENTIONS = True
 
 
 class ChatInput(QTextEdit):
 
+    MODEL_SELECTOR_KEY = "model"
+    REASONING_EFFORT_KEY = "reasoning_effort"
+
+    MENTION_ID_PROP = QTextFormat.UserProperty + 201
+    MENTION_KIND_PROP = QTextFormat.UserProperty + 202
+    MENTION_VALUE_PROP = QTextFormat.UserProperty + 203
+    MENTION_LABEL_PROP = QTextFormat.UserProperty + 204
+    MENTION_SCAN_LIMIT = 5000
+
     ICON_PASTE = QIcon(":/icons/paste.svg")
     ICON_VOLUME = QIcon(":/icons/volume.svg")
     ICON_SAVE = QIcon(":/icons/save.svg")
-    # ICON_ATTACHMENT = QIcon(":/icons/add.svg")
-    ICON_ATTACHMENT = QIcon(":/icons/attachment.svg")
+    ICON_ATTACHMENT = QIcon(":/icons/add.svg")
     ICON_MIC_ON = QIcon(":/icons/mic.svg")
     ICON_MIC_OFF = QIcon(":/icons/mic_off.svg")
     ICON_WEB_ON = QIcon(":/icons/web_on.svg")
@@ -48,6 +80,32 @@ class ChatInput(QTextEdit):
         """
         super().__init__(window)
         self.window = window
+
+        # Mention state. The actual durable value lives in QTextCharFormat user
+        # properties; QSS controls only its visual color.
+        self._mention_color = QColor("#39a85a")
+        self._mention_formatting = False
+        self._mention_loading = False
+        self._mention_trigger_pos = None
+        self._mention_button_cursor = None
+        self._mention_dismissed = False
+        self._mention_entries = []
+        self._mention_source_key = None
+        self._mention_seq = 0
+        self._workdir_discovery = WorkdirMentionDiscovery(self)
+        self._workdir_discovery.updated.connect(self._on_workdir_mentions_updated)
+        self._conversation_discovery = ConversationTitleDiscovery(self)
+        self._conversation_discovery.updated.connect(self._on_workdir_mentions_updated)
+        self._conversation_discovery.failed.connect(self.window.core.debug.log)
+        self._mention_refresh_timer = QTimer(self)
+        self._mention_refresh_timer.setSingleShot(True)
+        self._mention_refresh_timer.setInterval(0)
+        self._mention_refresh_timer.timeout.connect(self._refresh_mention_popup)
+        self._mention_popup = MentionPopup(self)
+        self._mention_popup.selected.connect(self._accept_mention_entry)
+        self._mention_popup.attachment_share_changed.connect(self._set_attachment_shared)
+        self._mention_popup.library_share_changed.connect(self._set_library_shared)
+
         self.setAcceptRichText(False)
         self.setPlaceholderText(trans("input.placeholder"))
         self.setFocus()
@@ -55,8 +113,10 @@ class ChatInput(QTextEdit):
         self.max_font_size = 42
         self.min_font_size = 8
         self._text_top_padding = 10
+        self._text_horizontal_padding = 10
         self.textChanged.connect(self.window.controller.ui.update_tokens)
         self.setProperty('class', 'layout-input')
+        self.setObjectName('chatInput')
 
         if self.window.core.platforms.is_windows():
             self._text_top_padding = 8
@@ -73,11 +133,13 @@ class ChatInput(QTextEdit):
         self._icon_size_right = QSize(20, 20)  # slightly larger by default
         self._btn_size_right = QSize(26, 26)   # slightly larger by default
 
-        # Independent margins/spacing/offset for the right-bottom bar
+        # Independent padding/spacing/offset for the dedicated bottom controls row.
+        # The row occupies its own band below the text viewport, so its controls
+        # never reduce the usable text width.
         self._icons_margin_right = 6
         self._icons_spacing_right = 4
         self._icons_offset_x_right = 0
-        self._icons_offset_y_right = 4  # position the right bar 4px lower by default
+        self._icons_offset_y_right = 4
 
         # Storage for icon buttons and metadata
         self._icons = {}       # key -> QPushButton
@@ -87,53 +149,65 @@ class ChatInput(QTextEdit):
         # Storage for right-bottom icon buttons and metadata
         self._icons_right = {}       # key -> QPushButton
         self._icon_meta_right = {}   # key -> meta as above
-        self._icon_order_right = []  # rendering order for right bar
+        self._icon_order_right = []  # rendering order for the bottom row
+        self._bottom_left_icon_keys = set()  # controls pinned to the row's left edge
+        self._right_text_buttons = set()  # non-icon buttons embedded in the right bar
+        self._reasoning_effort_menu = None
+        self._tools_menu = None
 
         self._init_icon_bar()
-        # Initialize the bottom-right icon bar (independent from the left one)
+        # Initialize the shared bottom actions row. It contains a left group
+        # (attachment/web) and a right group (model/reasoning/mic/send).
         self._init_icon_bar_right()
 
-        # Add a "+" button in the top-left corner to add attachments
-        self.add_icon(
+        # Attachment and web-search controls live on the left side of the
+        # dedicated bottom actions row. This keeps all input actions in one
+        # horizontal band while model/reasoning/mic/send remain right-aligned.
+        self.add_bottom_left_icon(
             key="attach",
             icon=self.ICON_ATTACHMENT,
             tooltip=trans("attachments.btn.input.add"),
             callback=self.action_add_attachment,
             visible=True,
         )
+        # Runtime model selector lives in the same bottom controls row as
+        # reasoning effort. Keep it immediately to the left of reasoning so
+        # model + effort form one compact selection group.
+        self.add_model_selector()
+
+        # Runtime reasoning-effort selector. It is shown only for models which
+        # explicitly opt in and is placed immediately to the left of microphone.
+        self.add_reasoning_effort_button()
+
         # Add a microphone button (hidden by default; shown when audio input is enabled)
         # Placed on the bottom-right icon bar
         self.add_right_icon(
             key="mic",
             icon=self.ICON_MIC_ON,
             alt_icon=self.ICON_MIC_OFF,
-            tooltip=trans('audio.speak.btn'),
+            tooltip=trans('audio.speak.btn.icon.tooltip'),
             alt_tooltip=trans('audio.speak.btn.stop.tooltip'),
             callback=self.action_toggle_mic,
             visible=False,
         )
-        # Add a web search toggle button
-        self.add_icon(
-            key="web",
-            icon=self.ICON_WEB_OFF,
-            alt_icon=self.ICON_WEB_ON,
-            tooltip=trans('icon.remote_tool.web.disabled'),
-            alt_tooltip=trans('icon.remote_tool.web.enabled'),
-            callback=self.action_toggle_web,
-            visible=True,
-        )
+        self._bottom_left_icon_keys.add('web')
+        tools_button = self.add_right_button('web', '', callback=self.action_tools_menu)
+        tools_button.setObjectName('chatInputTools')
+        tools_button.setFlat(True)
+        self.update_tools_selector()
 
-        # Apply initial margins (top padding + left space for icons)
-        # Also reserve right space for bottom-right icons; bottom margin stays 0
+        # Apply initial margins (top padding + left icon space + dedicated
+        # bottom controls row when any right-side controls are visible).
         self._apply_margins()
+        self.update_reasoning_effort()
 
         # ---- Auto-resize config (input in splitter) ----
         self._auto_max_lines = 10  # max lines for auto-expansion
-        self._auto_max_ratio = 0.25  # max fraction of main window height
+        self._auto_max_ratio = 0.40  # max fraction of main window height
         self._auto_debounce_ms = 0  # coalesce updates in next event loop turn
         self._auto_updating = False  # reentrancy guard
         self._splitter_resize_in_progress = False
-        self._splitter_connected = False
+        self._splitter_connections = set()
         self._user_adjusting_splitter = False
         self._auto_pause_ms_after_user_drag = 350
         self._last_target_container_h = None
@@ -147,6 +221,8 @@ class ChatInput(QTextEdit):
         self._tokens_timer.setInterval(1500)
         self._tokens_timer.timeout.connect(self.window.controller.ui.update_tokens)
         self.textChanged.connect(self._on_text_changed_tokens)
+        self.textChanged.connect(self._on_mention_text_changed)
+        self.cursorPositionChanged.connect(self._on_mention_cursor_changed)
 
         # Paste/input safety limits
         self._paste_max_chars = 1000000000  # hard cap to prevent pathological pastes from freezing/crashing
@@ -156,6 +232,7 @@ class ChatInput(QTextEdit):
 
         # Drag & Drop: add as attachments; do not insert file paths into text
         self._dnd_handler = AttachmentDropHandler(self.window, self, policy=AttachmentDropHandler.INPUT_MIX)
+        self._directory_paste_handler = DirectoryPasteHandler(self.window, self)
 
         # --- History navigation (input prompts) ---
         # Stores sent prompts and allows keyboard navigation through the history.
@@ -164,6 +241,707 @@ class ChatInput(QTextEdit):
         self._history_index = -1     # -1 when not navigating; otherwise index of current history item
         self._history_active = False
         self._history_saved_current = ""  # snapshot of the current typed text before entering history nav
+
+    def _activate_owner_column(self):
+        """Mark the column hosting the shared composer as logically active.
+
+        tabs.on_column_focus() is deferred/coalesced, so this is safe to call
+        from input focus and button press handlers.  send_input() also observes
+        the pending column, which keeps an immediate Send click routed to the
+        chat that visibly owns this composer.
+        """
+        try:
+            tabs = self.window.controller.tabs
+            if hasattr(tabs, 'get_chat_input_column_idx'):
+                column_idx = tabs.get_chat_input_column_idx()
+            else:
+                column_idx = tabs.get_current_column_idx()
+            if column_idx is not None:
+                tabs.on_column_focus(int(column_idx))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+
+    def focusInEvent(self, event):
+        """Activate the owning chat column when the text editor gains focus."""
+        super().focusInEvent(event)
+        self._activate_owner_column()
+
+    def _get_mention_color(self):
+        return self._mention_color
+
+    def _set_mention_color(self, color):
+        """QSS-backed color for mention anchors inside the QTextEdit."""
+        try:
+            value = color if isinstance(color, QColor) else QColor(color)
+            if not value.isValid():
+                return
+            self._mention_color = value
+            if hasattr(self, "_mention_formatting"):
+                QTimer.singleShot(0, self._refresh_mention_formats)
+        except Exception:
+            pass
+
+    mentionColor = Property(QColor, _get_mention_color, _set_mention_color)
+
+    @staticmethod
+    def _cursor_selected_text(cursor: QTextCursor) -> str:
+        """Return QTextCursor text with paragraph separators normalized to LF."""
+        return cursor.selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+
+    def _insert_plain_cursor(self, cursor: QTextCursor, text: str):
+        """Insert plain text while keeping LF semantics predictable in QTextDocument."""
+        if not text:
+            return
+        parts = str(text).split("\n")
+        for idx, part in enumerate(parts):
+            if part:
+                cursor.insertText(part)
+            if idx < len(parts) - 1:
+                cursor.insertBlock()
+
+    def _new_mention_format(self, entry: MentionEntry) -> QTextCharFormat:
+        self._mention_seq += 1
+        fmt = QTextCharFormat()
+        fmt.setProperty(self.MENTION_ID_PROP, f"m{self._mention_seq}")
+        fmt.setProperty(self.MENTION_KIND_PROP, entry.kind)
+        fmt.setProperty(self.MENTION_VALUE_PROP, entry.value)
+        fmt.setProperty(self.MENTION_LABEL_PROP, entry.label)
+        fmt.setForeground(self._mention_color)
+        fmt.setFontWeight(600)
+        return fmt
+
+    def _insert_mention_cursor(self, cursor: QTextCursor, entry: MentionEntry):
+        fmt = self._new_mention_format(entry)
+        cursor.insertText("@" + entry.label, fmt)
+        # Never let subsequent normal typing inherit mention metadata.
+        cursor.setCharFormat(QTextCharFormat())
+
+    def _insert_serialized_cursor(self, cursor: QTextCursor, text: str):
+        raw = str(text or "")
+        last = 0
+        for mention in iter_mention_tags(raw):
+            self._insert_plain_cursor(cursor, raw[last:mention.start])
+            kind = mention.kind
+            value = mention.value
+            label = mention.label or mention_label_for(kind, value)
+            if label:
+                self._insert_mention_cursor(
+                    cursor,
+                    MentionEntry(
+                        kind=kind,
+                        label=label,
+                        value=value,
+                        is_dir=(kind == KIND_FILE_CONTEXT and value.replace("\\", "/").endswith("/")),
+                    ),
+                )
+            else:
+                self._insert_plain_cursor(cursor, mention.raw)
+            last = mention.end
+        self._insert_plain_cursor(cursor, raw[last:])
+
+    def set_mention_text(self, text: str):
+        """Set input from durable text, restoring mention metadata and styling."""
+        self._mention_loading = True
+        try:
+            self._mention_popup.hide()
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+            self.clear()
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.Start)
+            self._insert_serialized_cursor(cursor, str(text or ""))
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+        finally:
+            self._mention_loading = False
+        self._refresh_mention_formats()
+        self._schedule_auto_resize()
+
+    def append_mention_text(self, text: str, separator: str = "\n"):
+        """Append durable text while restoring any mention tags as UI anchors."""
+        text = str(text or "").strip()
+        if not text:
+            return
+        self._mention_loading = True
+        try:
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            if self.toPlainText().strip():
+                self._insert_plain_cursor(cursor, separator)
+            self._insert_serialized_cursor(cursor, text)
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+        finally:
+            self._mention_loading = False
+        self._refresh_mention_formats()
+        self.setFocus()
+
+    def _collect_mention_groups(self):
+        """Collect contiguous QTextDocument fragments carrying the same mention id."""
+        groups = []
+        current = None
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    fmt = fragment.charFormat()
+                    mention_id = fmt.property(self.MENTION_ID_PROP)
+                    if mention_id:
+                        mention_id = str(mention_id)
+                        kind = str(fmt.property(self.MENTION_KIND_PROP) or "")
+                        value = str(fmt.property(self.MENTION_VALUE_PROP) or "")
+                        label = str(fmt.property(self.MENTION_LABEL_PROP) or "")
+                        start = fragment.position()
+                        end = start + fragment.length()
+                        if current is not None and current["id"] == mention_id and current["end"] == start:
+                            current["end"] = end
+                        else:
+                            if current is not None:
+                                groups.append(current)
+                            current = {
+                                "id": mention_id,
+                                "kind": kind,
+                                "value": value,
+                                "label": label,
+                                "start": start,
+                                "end": end,
+                            }
+                    else:
+                        if current is not None:
+                            groups.append(current)
+                            current = None
+                iterator += 1
+            if current is not None:
+                groups.append(current)
+                current = None
+            block = block.next()
+        return groups
+
+    def _validate_mention_groups(self, clean_invalid: bool = False):
+        valid = []
+        invalid = []
+        doc = self.document()
+        for group in self._collect_mention_groups():
+            kind = group["kind"]
+            if kind not in (KIND_ATTACHMENT, KIND_FILE_CONTEXT, KIND_CONVERSATION) \
+                    or not group["label"] or not group["value"]:
+                invalid.append(group)
+                continue
+            cursor = QTextCursor(doc)
+            cursor.setPosition(group["start"])
+            cursor.setPosition(group["end"], QTextCursor.KeepAnchor)
+            actual = self._cursor_selected_text(cursor)
+            if actual == "@" + group["label"]:
+                valid.append(group)
+            else:
+                invalid.append(group)
+
+        if clean_invalid and invalid:
+            for group in invalid:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(group["start"])
+                cursor.setPosition(group["end"], QTextCursor.KeepAnchor)
+                cursor.setCharFormat(QTextCharFormat())
+        return valid
+
+    def _refresh_mention_formats(self):
+        if self._mention_formatting or self._mention_loading:
+            return
+        self._mention_formatting = True
+        try:
+            valid = self._validate_mention_groups(clean_invalid=True)
+            for group in valid:
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(group["start"])
+                cursor.setPosition(group["end"], QTextCursor.KeepAnchor)
+                fmt = QTextCharFormat()
+                fmt.setForeground(self._mention_color)
+                fmt.setFontWeight(600)
+                cursor.mergeCharFormat(fmt)
+        finally:
+            self._mention_formatting = False
+
+    def serialize_mentions(self) -> str:
+        """Return input text with valid UI mention anchors converted to model-facing tags."""
+        valid = self._validate_mention_groups(clean_invalid=False)
+        if not valid:
+            return self.toPlainText()
+
+        doc = self.document()
+        result = []
+        pos = 0
+        for group in valid:
+            if group["start"] < pos:
+                continue
+            cursor = QTextCursor(doc)
+            cursor.setPosition(pos)
+            cursor.setPosition(group["start"], QTextCursor.KeepAnchor)
+            result.append(self._cursor_selected_text(cursor))
+            result.append(make_mention_tag(
+                group["kind"],
+                group["value"],
+                label=group["label"],
+            ))
+            pos = group["end"]
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(pos)
+        cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+        result.append(self._cursor_selected_text(cursor))
+        return "".join(result)
+
+    def _on_mention_text_changed(self):
+        if self._mention_loading or self._mention_formatting:
+            return
+        self._mention_button_cursor = None
+        self._mention_dismissed = False
+        self._refresh_mention_formats()
+        self._mention_refresh_timer.start()
+
+    def _on_mention_cursor_changed(self):
+        if self._mention_loading:
+            return
+        self._mention_button_cursor = None
+        self._mention_refresh_timer.start()
+
+    def _find_mention_trigger(self):
+        """Return (at_pos, end_pos, query) for the nearest live @ trigger."""
+        current = self.textCursor()
+        if current.hasSelection():
+            return None
+        block = current.block()
+        block_start = block.position()
+        probe = QTextCursor(current)
+        at_cursor = None
+
+        while probe.position() > block_start:
+            probe.clearSelection()
+            if not probe.movePosition(QTextCursor.PreviousCharacter, QTextCursor.KeepAnchor):
+                break
+            char = self._cursor_selected_text(probe)
+            # Completion belongs to the token currently being typed, never an
+            # earlier @ elsewhere in the paragraph. Whitespace ends a token.
+            if char.isspace():
+                return None
+            if char == "@":
+                at_cursor = QTextCursor(probe)
+                break
+            probe.setPosition(probe.selectionStart())
+
+        if at_cursor is None:
+            return None
+        if at_cursor.charFormat().property(self.MENTION_ID_PROP):
+            return None
+
+        at_pos = at_cursor.selectionStart()
+        end_pos = current.position()
+        # charFormat() at a fragment boundary can describe the preceding
+        # plain text instead of the selected @. Check the durable anchor range.
+        if any(group['start'] <= at_pos < group['end']
+               for group in self._collect_mention_groups()):
+            return None
+
+        # Avoid triggering inside an e-mail/path/identifier: foo@bar, ./@name, etc.
+        if at_pos > block_start:
+            prev = QTextCursor(self.document())
+            prev.setPosition(at_pos)
+            prev.movePosition(QTextCursor.PreviousCharacter, QTextCursor.KeepAnchor)
+            prev_char = self._cursor_selected_text(prev)
+            if prev_char and (prev_char.isalnum() or prev_char in "_./\\-"):
+                return None
+
+        query_cursor = QTextCursor(self.document())
+        query_cursor.setPosition(at_cursor.selectionEnd())
+        query_cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+        query = self._cursor_selected_text(query_cursor)
+        if "\n" in query or "\t" in query or len(query) > 200:
+            return None
+        return at_pos, end_pos, query
+
+    def _get_mention_source_key(self):
+        core = self.window.core
+        try:
+            mode = core.config.get("mode")
+        except Exception:
+            mode = None
+        try:
+            meta = core.ctx.get_current_meta()
+        except Exception:
+            meta = None
+        try:
+            root = core.filesystem.get_data_dir(ctx=meta, create=False)
+        except Exception:
+            root = None
+        return (
+            mode,
+            root,
+            WORKDIR_MENTIONS_HIDE_BLACKLISTED,
+            core.config.get('llama.idx.excluded.ext', ''),
+            getattr(meta, "id", None),
+            getattr(meta, "group_id", None),
+            core.attachments.context.is_project_share_enabled(meta),
+        )
+
+    def _set_attachment_shared(self, attachment_id, enabled):
+        self._set_library_shared(enabled, attachment_id)
+
+    def _set_library_shared(self, enabled, attachment_id=None):
+        context = self.window.core.attachments.context
+        meta = self.window.core.ctx.get_current_meta()
+        if meta is None or meta.group is None:
+            return
+        context.is_project_share_enabled(meta)  # resolve canonical group
+        if attachment_id is None:
+            meta.group.extra = dict(meta.group.extra or {})
+            meta.group.extra["attachment_share_all"] = bool(enabled)
+        if attachment_id is None or attachment_id.startswith("pending:"):
+            mode = self.window.core.config.get("mode")
+            for item in self.window.core.attachments.get_all(mode, only_files=True).values():
+                if attachment_id is None or attachment_id == f"pending:{item.id}":
+                    item.extra["project_active"] = bool(enabled)
+                    meta.group.extra = dict(meta.group.extra or {})
+                    meta.group.extra.setdefault("attachment_share_pending", {})[item.id] = bool(enabled)
+        changed = False
+        if attachment_id is None or not attachment_id.startswith("pending:"):
+            changed = context.set_project_items_active(meta, enabled, attachment_id)
+        if not changed:
+            context.refresh_share_flags(meta)
+        from pygpt_net.ui.layout.ctx.ctx_list import SHOW_ATTACHMENT_ICONS
+        if SHOW_ATTACHMENT_ICONS:
+            self.window.controller.ctx.update_list(reload=False, restore_scroll=True)
+        self.window.controller.chat.attachment.update()
+        self._mention_source_key = None
+        entries = self._build_mention_entries(include_workdir=not self._mention_popup._from_attachment_button)
+        self._mention_popup.set_project_state(True, context.is_project_share_enabled(meta),
+                                             (meta.group.extra or {}).get("attachment_share_all", False))
+        self._mention_popup.set_entries(entries, from_attachment_button=self._mention_popup._from_attachment_button)
+
+    def _build_mention_entries(self, include_workdir: bool = True) -> list:
+        entries = []
+        seen = set()
+        core = self.window.core
+        mode = core.config.get("mode")
+        meta = core.ctx.get_current_meta()
+        project_enabled = meta is not None and meta.group is not None
+
+        attachment_items = []
+        try:
+            current_items = list(core.attachments.get_all(mode, only_files=True).values())
+            attachment_items.extend(current_items if include_workdir else reversed(current_items))
+        except Exception:
+            pass
+        try:
+            history_items = list(core.attachments.get_from_meta_ctx(mode, meta, include_inactive=bool(project_enabled)))
+            # Attachment registries/context lists retain insertion order. Current
+            # uploads are newer than stored context; reverse each source for [+].
+            attachment_items.extend(history_items if include_workdir else reversed(history_items))
+        except Exception:
+            pass
+
+        project_items = []
+        if project_enabled:
+            project_items = core.attachments.context.get_project_items(meta)
+        for item in attachment_items:
+            extra = getattr(item, "extra", None)
+            if isinstance(extra, dict) and extra.get("append_to_ctx", True) is False:
+                continue
+            name = str(getattr(item, "name", None) or "").strip()
+            path = str(getattr(item, "path", None) or "").strip()
+            if not name and path:
+                name = os.path.basename(path.rstrip("/\\"))
+            if not name or any(ch in name for ch in "\r\n\t"):
+                continue
+            candidates = [source for source in project_items if source.get("name") == name]
+            item_id = getattr(item, "id", None)
+            source = next((source for source in candidates if item_id
+                           and item_id in (source.get("uuid"), source.get("attachment_id"))), None)
+            if source is None and candidates:
+                source = next((source for source in reversed(candidates) if path in
+                              (source.get("path"), source.get("real_path"))), None)
+            shared = source is not None
+            pending_id = getattr(item, "id", None)
+            pending = project_enabled and not shared and isinstance(pending_id, str) and bool(pending_id)
+            value = (f"project-attachment:{source['uuid']}:{name}" if shared
+                     else f"project-attachment:{pending_id}:{name}" if pending else name)
+            key = (KIND_ATTACHMENT, value.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            web_source = ((source or {}).get("type") == "url"
+                          or getattr(item, "type", None) == AttachmentItem.TYPE_URL)
+            entries.append(MentionEntry(KIND_ATTACHMENT, name, value, False,
+                                        icon=':/icons/language.svg' if web_source else '', shared=bool(shared or pending),
+                                        active=core.attachments.context.is_shared(source) if source else (extra or {}).get("project_active", False) if project_enabled else True,
+                                        attachment_id=str(source["uuid"]) if source else (f"pending:{pending_id}" if pending else "")))
+
+        # Use the same registered reader choices as the existing URL dialog.
+        for choice in self.window.controller.config.placeholder.apply_by_id('llama_index_loaders_web'):
+            for key, label in choice.items():
+                loader_id = key.removeprefix('web_')
+                provider = core.idx.indexing.get_loader(loader_id)
+                icon = getattr(provider, 'icon', '') or ':/icons/language.svg'
+                entries.append(MentionEntry('web_loader', label, loader_id, icon=icon))
+
+        if not include_workdir:
+            return entries
+
+        entries.extend(self._get_workdir_mention_entries(meta))
+        return entries
+
+    def _get_workdir_mention_entries(self, meta):
+        core = self.window.core
+        try:
+            mapper = core.filesystem.local_path_mapper(ctx=meta)
+            excluded_extensions = frozenset()
+            excluded_paths = frozenset()
+            if WORKDIR_MENTIONS_HIDE_BLACKLISTED:
+                excluded = core.config.get('llama.idx.excluded.ext', '') or ''
+                excluded_extensions = frozenset(
+                    ext.strip().lower().lstrip('.') for ext in excluded.split(',') if ext.strip()
+                )
+                excluded_paths = core.idx.indexing.excluded_paths(data_dir=mapper.data)
+            spec = ScanSpec(mapper.data, mapper, excluded_extensions, excluded_paths, self.MENTION_SCAN_LIMIT)
+            return self._workdir_discovery.entries(spec)
+        except Exception as e:
+            core.debug.log(e)
+            return []
+
+    def _on_workdir_mentions_updated(self):
+        # A queued background result must not reopen a dismissed picker.
+        self._mention_source_key = None
+        self._refresh_mention_popup()
+
+    def _get_conversation_mention_entry(self, query: str):
+        """Resolve an exact numeric @query to one chat-history entry."""
+        raw = str(query or "")
+        # Numeric history mentions are exact tokens. A whitespace separator ends
+        # the trigger instead of being silently stripped back to a valid ID.
+        if not raw or raw != raw.strip() or not raw.isdigit():
+            return None
+        try:
+            meta = self.window.core.ctx.get_meta_by_id(int(raw))
+        except Exception as e:
+            try:
+                self.window.core.debug.log(e)
+            except Exception:
+                pass
+            return None
+        if meta is None or getattr(meta, "deleted", False):
+            return None
+        title = str(getattr(meta, "name", None) or raw).strip()
+        if not title or any(ch in title for ch in "\r\n\t"):
+            title = raw
+        return MentionEntry(KIND_CONVERSATION, title, raw, False)
+
+    def _get_conversation_mention_entries(self, query: str):
+        """Resolve exact IDs and case-insensitive title fragments across history."""
+        raw = str(query or '')
+        if not raw or raw != raw.strip():
+            return []
+        matches, seen = [], set()
+        if raw.isdigit():
+            entry = self._get_conversation_mention_entry(raw)
+            if entry is not None:
+                matches.append(entry)
+                seen.add(str(int(raw)))
+        try:
+            db = self.window.core.db.get_db()
+            titles = self._conversation_discovery.entries(db)
+        except Exception as e:
+            self.window.core.debug.log(e)
+            return matches
+        query = raw.casefold()
+        for entry, title in titles:
+            if query in title and entry.value not in seen:
+                matches.append(entry)
+                seen.add(entry.value)
+                if len(matches) >= MentionPopup.MAX_RESULTS:
+                    break
+        return matches
+
+    def _restore_conversation_mention_query(self) -> bool:
+        """Turn an edited/backspaced conversation title anchor back into @<id>."""
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False
+        pos = cursor.position()
+        for group in self._validate_mention_groups(clean_invalid=False):
+            if group["kind"] != KIND_CONVERSATION:
+                continue
+
+            replace_end = group["end"]
+            inside_or_at_end = group["start"] < pos <= group["end"]
+            after_auto_space = False
+            if pos == group["end"] + 1:
+                separator = QTextCursor(self.document())
+                separator.setPosition(group["end"])
+                separator.setPosition(pos, QTextCursor.KeepAnchor)
+                after_auto_space = self._cursor_selected_text(separator) == " "
+                if after_auto_space:
+                    replace_end = pos
+
+            if not inside_or_at_end and not after_auto_space:
+                continue
+            ctx_id = str(group["value"] or "").strip()
+            if not ctx_id.isdigit():
+                return False
+            self._mention_loading = True
+            try:
+                replacement = QTextCursor(self.document())
+                replacement.setPosition(group["start"])
+                replacement.setPosition(replace_end, QTextCursor.KeepAnchor)
+                replacement.beginEditBlock()
+                try:
+                    replacement.removeSelectedText()
+                    replacement.insertText("@" + ctx_id, QTextCharFormat())
+                finally:
+                    replacement.endEditBlock()
+                self.setTextCursor(replacement)
+            finally:
+                self._mention_loading = False
+            self._mention_popup.hide()
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+            QTimer.singleShot(0, self._refresh_mention_popup)
+            return True
+        return False
+
+    def _refresh_mention_popup(self):
+        if self._mention_loading or getattr(self, '_mention_dismissed', False) or not self.hasFocus():
+            self._mention_popup.hide()
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+            return
+
+        button_cursor = getattr(self, '_mention_button_cursor', None)
+        trigger = ((button_cursor.selectionStart(), button_cursor.selectionEnd(), '')
+                   if button_cursor is not None else self._find_mention_trigger())
+        if trigger is None:
+            self._mention_popup.hide()
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+            return
+
+        at_pos, _end_pos, query = trigger
+        source_key = (self._get_mention_source_key(), button_cursor is not None)
+        if (self._mention_trigger_pos != at_pos
+                or self._mention_source_key != source_key):
+            self._mention_trigger_pos = at_pos
+            self._mention_source_key = source_key
+            self._mention_entries = (self._build_mention_entries(include_workdir=False)
+                                     if button_cursor is not None else self._build_mention_entries())
+
+        entries = list(self._mention_entries)
+        entries.extend(self._get_conversation_mention_entries(query))
+        meta = self.window.core.ctx.get_current_meta()
+        context = self.window.core.attachments.context
+        self._mention_popup.set_project_state(meta is not None and meta.group is not None,
+                                             context.is_project_share_enabled(meta),
+                                             (meta.group.extra or {}).get("attachment_share_all", False) if meta and meta.group else False)
+        if not self._mention_popup.set_entries(
+                entries, from_attachment_button=button_cursor is not None, query=query):
+            return
+
+        anchor = QTextCursor(self.document())
+        anchor.setPosition(at_pos)
+        rect = self.cursorRect(anchor)
+        global_pos = self.viewport().mapToGlobal(rect.topLeft())
+        button = getattr(self, '_icons_right', {}).get('attach')
+        if button_cursor is not None and button is not None:
+            global_pos = button.mapToGlobal(QPoint(0, 0))
+            self._mention_popup.show_above(global_pos, gap=0)
+        else:
+            self._mention_popup.show_above(global_pos)
+        self.setFocus()
+
+    def _accept_mention_entry(self, entry: MentionEntry):
+        if entry.kind in ('sketch', 'web_loader'):
+            self._mention_popup.hide()
+            self._mention_button_cursor = None
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+            self._mention_dismissed = True
+            if entry.kind == 'web_loader':
+                self.window.controller.attachment.open_add_url(loader_id=entry.value)
+            else:
+                self.window.controller.tabs.open_or_activate(Tab.TAB_TOOL, 'painter')
+            return
+        button_cursor = getattr(self, '_mention_button_cursor', None)
+        trigger = ((button_cursor.selectionStart(), button_cursor.selectionEnd(), '')
+                   if button_cursor is not None else self._find_mention_trigger())
+        self._mention_button_cursor = None
+        if trigger is None:
+            return
+        at_pos, end_pos, _query = trigger
+        if entry.kind == 'upload':
+            self._mention_popup.hide()
+            if button_cursor is not None:
+                self._mention_trigger_pos = None
+                self._mention_source_key = None
+                self._mention_dismissed = True
+            added = self.window.controller.attachment.open_add()
+            if button_cursor is not None or not added:
+                self.setFocus()
+                return
+            self._mention_loading = True
+            try:
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(at_pos)
+                cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+                cursor.beginEditBlock()
+                try:
+                    cursor.removeSelectedText()
+                    for attachment in added:
+                        name = attachment.name or os.path.basename(attachment.path or '')
+                        self._insert_mention_cursor(cursor, MentionEntry(KIND_ATTACHMENT, name, name))
+                        self._insert_plain_cursor(cursor, ' ')
+                finally:
+                    cursor.endEditBlock()
+                self.setTextCursor(cursor)
+                self._mention_source_key = None
+                self._mention_trigger_pos = None
+            finally:
+                self._mention_loading = False
+            self._refresh_mention_formats()
+            self.setFocus()
+            self._schedule_auto_resize()
+            return
+
+        next_char = ""
+        after = QTextCursor(self.document())
+        after.setPosition(end_pos)
+        if after.movePosition(QTextCursor.NextCharacter, QTextCursor.KeepAnchor):
+            next_char = self._cursor_selected_text(after)
+
+        self._mention_loading = True
+        try:
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(at_pos)
+            cursor.setPosition(end_pos, QTextCursor.KeepAnchor)
+            cursor.beginEditBlock()
+            try:
+                cursor.removeSelectedText()
+                self._insert_mention_cursor(cursor, entry)
+                # Add a separator at end/before another word, but do not create
+                # awkward whitespace before punctuation when inserting in-place.
+                if (not next_char
+                        or (not next_char.isspace()
+                            and (next_char.isalnum() or next_char in "@_"))):
+                    cursor.insertText(" ")
+            finally:
+                cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            self._mention_popup.hide()
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+        finally:
+            self._mention_loading = False
+
+        self._refresh_mention_formats()
+        self.setFocus()
+        self._schedule_auto_resize()
 
     def _on_text_changed_tokens(self):
         """Schedule token count update with debounce."""
@@ -365,14 +1143,7 @@ class ChatInput(QTextEdit):
                             if not local_path:
                                 continue
                             if os.path.isdir(local_path):
-                                # Recursively add all files from the dropped directory
-                                for root, _, files in os.walk(local_path):
-                                    for name in files:
-                                        fpath = os.path.join(root, name)
-                                        try:
-                                            self.window.controller.attachment.from_clipboard_url(fpath, all=True)
-                                        except Exception:
-                                            continue
+                                self._directory_paste_handler.add_directory(local_path)
                             else:
                                 self.window.controller.attachment.from_clipboard_url(local_path, all=True)
                         else:
@@ -461,6 +1232,29 @@ class ChatInput(QTextEdit):
         key = event.key()
         mods = event.modifiers()
 
+        # Backspace on a virtual conversation title restores the raw numeric
+        # trigger instead of leaving a partially edited fake title behind.
+        if key == Qt.Key_Backspace and mods == Qt.NoModifier:
+            if self._restore_conversation_mention_query():
+                return
+
+        # Mention picker owns navigation/accept keys while visible.
+        if self._mention_popup.isVisible():
+            if key == Qt.Key_Up:
+                self._mention_popup.move_selection(-1)
+                return
+            if key == Qt.Key_Down:
+                self._mention_popup.move_selection(1)
+                return
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                if self._mention_popup.choose_current():
+                    return
+            if key == Qt.Key_Escape:
+                self._mention_button_cursor = None
+                self._mention_popup.hide()
+                self._mention_trigger_pos = None
+                return
+
         # --- History navigation and recall ---
         # Ctrl/Command + Up/Down navigates history regardless of current text.
         if key in (Qt.Key_Up, Qt.Key_Down) and (mods & (Qt.ControlModifier | Qt.MetaModifier)):
@@ -491,15 +1285,11 @@ class ChatInput(QTextEdit):
 
                 if mode == 2:
                     if has_shift_or_ctrl:
-                        text_before_send = self.toPlainText()
                         self.window.controller.chat.input.send_input()
-                        self._on_prompt_sent(text_before_send)
                         handled = True
                 else:
                     if not has_shift_or_ctrl:
-                        text_before_send = self.toPlainText()
                         self.window.controller.chat.input.send_input()
-                        self._on_prompt_sent(text_before_send)
                         handled = True
 
                 self.setFocus()
@@ -512,6 +1302,24 @@ class ChatInput(QTextEdit):
 
         if not handled:
             super().keyPressEvent(event)
+
+    def _hide_mention_after_focus_out(self):
+        # A click in the non-focusable popup can briefly move focus away from
+        # QTextEdit before QListWidget emits itemClicked. Defer closing by one
+        # event-loop turn so mouse selection can finish first.
+        if self.hasFocus():
+            return
+        if self._mention_popup.underMouse():
+            QTimer.singleShot(80, self._hide_mention_after_focus_out)
+            return
+        self._mention_button_cursor = None
+        self._mention_popup.hide()
+        self._mention_trigger_pos = None
+        self._mention_source_key = None
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        QTimer.singleShot(0, self._hide_mention_after_focus_out)
 
     def wheelEvent(self, event):
         """
@@ -536,16 +1344,7 @@ class ChatInput(QTextEdit):
         super().wheelEvent(event)
 
     def on_zoom_changed(self, value: int):
-        """
-        Called when zoom level changes.
-
-        :param value: new zoom level
-        """
-        self.value = value
-        self.window.core.config.data['font_size.input'] = value
-        self.window.core.config.save()
-        self.window.controller.ui.update_font_size()
-        # Reflow may change number of lines; adjust auto-height next tick
+        zoom_text(self, self.window, value, 'font_size.input')
         QTimer.singleShot(0, self._schedule_auto_resize)
 
     def changeEvent(self, event):
@@ -553,17 +1352,295 @@ class ChatInput(QTextEdit):
         if event.type() == QEvent.FontChange:
             self._schedule_auto_resize()
 
+    def _dismiss_mention_popup(self):
+        if self._mention_popup.isVisible():
+            self._mention_popup.hide()
+            self._mention_button_cursor = None
+            self._mention_trigger_pos = None
+            self._mention_source_key = None
+            self._mention_dismissed = True
+
+    def mousePressEvent(self, event):
+        self._dismiss_mention_popup()
+        super().mousePressEvent(event)
+
     def action_add_attachment(self):
-        """Add attachment (button click)."""
-        self.window.controller.attachment.open_add()
+        """Open the configured attachment picker without modifying the input."""
+        if not ATTACHMENT_BUTTON_OPEN_MENTIONS:
+            self.window.controller.attachment.open_add()
+            return
+        self.setFocus()
+        self._mention_dismissed = False
+        self._mention_button_cursor = QTextCursor(self.textCursor())
+        self._mention_trigger_pos = None
+        self._mention_source_key = None
+        self._refresh_mention_popup()
 
     def action_toggle_mic(self):
         """Toggle microphone (button click)."""
+        try:
+            if not self.window.controller.audio.is_recording():
+                self.window.controller.audio.ui.on_input_toggle_requested("input")
+        except Exception:
+            pass
         self.window.dispatch(Event(Event.AUDIO_INPUT_RECORD_TOGGLE))
+
+    def update_tools_selector(self):
+        button = self._icons_right.get('web')
+        if button is None:
+            return
+        state = bool(self.window.core.config.get('cmd', False))
+        label = trans('input.tools.enabled' if state else 'input.tools.disabled')
+        prefix = '✓ ' if state else ''
+        button.setText(f'{prefix}{label}  ▴')
+        button.setToolTip(trans('input.tools.header'))
+        self._icon_meta_right['web']['tooltip'] = trans('input.tools.header')
+        self._fit_right_text_button(button)
+        self._update_icon_bar_geometry_right()
+        self._apply_margins()
+
+    def set_tools_enabled(self, enabled):
+        self.window.ui.nodes['cmd.enabled'].box.setChecked(enabled)
+        self.update_tools_selector()
+
+    def set_web_enabled(self, enabled):
+        remote = self.window.controller.chat.remote_tools
+        if bool(remote.enabled_global['web_search']) != enabled:
+            remote.toggle('web_search')
+
+    def action_tools_menu(self):
+        if self._tools_menu is not None:
+            self._tools_menu.close()
+        menu = QMenu(self)
+        menu.setObjectName('chatInputToolsMenu')
+        if os.name == 'nt':
+            menu.setAttribute(Qt.WA_TranslucentBackground, False)
+            menu.setWindowFlag(Qt.FramelessWindowHint, True)
+        else:
+            menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        sections = (
+            ('input.tools', bool(self.window.core.config.get('cmd', False)), self.set_tools_enabled),
+            ('input.internet', bool(self.window.controller.chat.remote_tools.enabled_global['web_search']), self.set_web_enabled),
+        )
+        for prefix, current, callback in sections:
+            if prefix == 'input.internet':
+                menu.addSeparator()
+            header_icon = 'terminal.svg' if prefix == 'input.tools' else 'web_search.svg'
+            header = QAction(QIcon(f':/icons/{header_icon}'), trans(prefix + '.header'), menu)
+            header.setEnabled(False)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            menu.addAction(header)
+            group = QActionGroup(menu)
+            group.setExclusive(True)
+            for enabled in (True, False):
+                action = QAction(trans(prefix + ('.enabled' if enabled else '.disabled')), menu)
+                action.setCheckable(True)
+                action.setChecked(enabled == current)
+                group.addAction(action)
+                action.triggered.connect(lambda checked=False, value=enabled, setter=callback: setter(value))
+                menu.addAction(action)
+        self._tools_menu = menu
+        menu.aboutToHide.connect(self._clear_tools_menu)
+        menu.adjustSize()
+        button = self._icons_right['web']
+        menu.popup(button.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
+
+    def _clear_tools_menu(self):
+        menu = self._tools_menu
+        self._tools_menu = None
+        if menu is not None:
+            menu.deleteLater()
 
     def action_toggle_web(self):
         """Toggle web search (button click)."""
         self.window.controller.chat.remote_tools.toggle('web_search')
+
+    def add_model_selector(self) -> CompactModelCombo:
+        """Add the runtime model selector to the right controls row."""
+        key = self.MODEL_SELECTOR_KEY
+        existing = self._icons_right.get(key)
+        if existing is not None:
+            return existing
+
+        btn = CompactModelCombo(
+            window=self.window,
+            id="prompt.model",
+            parent=self._icon_bar_right,
+        )
+        btn.setFixedHeight(self._btn_size_right.height())
+        btn.setMinimumWidth(self._btn_size_right.width())
+
+        self._icons_right[key] = btn
+        self._icon_order_right.append(key)
+        self._right_text_buttons.add(key)
+        self._icon_meta_right[key] = {
+            "icon": QIcon(),
+            "alt_icon": None,
+            "tooltip": trans("toolbox.model.label"),
+            "alt_tooltip": None,
+            "active": False,
+        }
+        self.window.ui.nodes["prompt.model"] = btn
+
+        self._rebuild_icon_layout_right()
+        self._update_icon_bar_geometry_right()
+        self._apply_margins()
+        return btn
+
+    def add_reasoning_effort_button(self) -> QPushButton:
+        """Add the runtime reasoning-effort selector to the right icon bar."""
+        key = self.REASONING_EFFORT_KEY
+        if key in self._icons_right:
+            return self._icons_right[key]
+
+        btn = QPushButton(self._icon_bar_right)
+        btn.setObjectName("chatInputReasoningEffort")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setFlat(True)
+        btn.setIcon(QIcon())
+        btn.setIconSize(QSize(0, 0))
+        btn.setFixedHeight(self._btn_size_right.height())
+        btn.setMinimumWidth(self._btn_size_right.width())
+        btn.setToolTip(trans("reasoning_effort.tooltip"))
+        btn.pressed.connect(self._activate_owner_column)
+        btn.clicked.connect(self.action_reasoning_effort)
+        btn.setHidden(True)
+
+        self._icons_right[key] = btn
+        self._icon_order_right.append(key)
+        self._icon_meta_right[key] = {
+            "icon": QIcon(),
+            "alt_icon": None,
+            "tooltip": trans("reasoning_effort.tooltip"),
+            "alt_tooltip": None,
+            "active": False,
+        }
+        self._rebuild_icon_layout_right()
+        self._update_icon_bar_geometry_right()
+        self._apply_margins()
+        return btn
+
+    def update_reasoning_effort(self):
+        """Refresh visibility, value and width of the reasoning-effort selector."""
+        btn = self._icons_right.get(self.REASONING_EFFORT_KEY)
+        if btn is None:
+            return
+
+        try:
+            model_key = self.window.core.config.get("model")
+            model = self.window.core.models.get(model_key)
+            efforts = self.window.core.models.get_reasoning_efforts(model)
+        except (AttributeError, RuntimeError):
+            efforts = []
+            model = None
+
+        if not efforts:
+            btn.setHidden(True)
+            self._update_icon_bar_geometry_right()
+            self._apply_margins()
+            return
+
+        current = self.window.core.models.get_reasoning_effort(model)
+        if current is None:
+            btn.setHidden(True)
+            self._update_icon_bar_geometry_right()
+            self._apply_margins()
+            return
+
+        label = trans(f"reasoning_effort.{current}")
+        btn.setText(f"{label}  ▴")
+        btn.setToolTip(trans("reasoning_effort.tooltip"))
+        btn.setFixedHeight(self._btn_size_right.height())
+
+        # This button is text-based, unlike the fixed-size icon buttons next to it.
+        # Calculate its width from the translated label every time the model/value
+        # changes.  sizeHint() includes the active Qt/QSS button padding; the
+        # explicit text fallback keeps enough room with styles whose hint omits
+        # some stylesheet padding.
+        btn.ensurePolished()
+        text_width = btn.fontMetrics().horizontalAdvance(btn.text())
+        hint_width = btn.sizeHint().width()
+        btn.setFixedWidth(max(
+            self._btn_size_right.width(),
+            hint_width,
+            text_width + 10,
+        ))
+        btn.setHidden(False)
+        self._update_icon_bar_geometry_right()
+        self._apply_margins()
+
+    def action_reasoning_effort(self):
+        """Open an upward popup with the effort values supported by this model."""
+        btn = self._icons_right.get(self.REASONING_EFFORT_KEY)
+        if btn is None or btn.isHidden():
+            return
+
+        model = self.window.core.models.get(self.window.core.config.get("model"))
+        efforts = self.window.core.models.get_reasoning_efforts(model)
+        current = self.window.core.models.get_reasoning_effort(model)
+        if not efforts:
+            return
+
+        menu = QMenu(self)
+        menu.setObjectName("chatInputReasoningEffortMenu")
+        if os.name == "nt":
+            # A translucent top-level QMenu can get a thick native frame/shadow
+            # on Windows. Keep this compact popup opaque and frameless instead;
+            # its background and outline are provided entirely by QSS.
+            menu.setAttribute(Qt.WA_TranslucentBackground, False)
+            menu.setWindowFlag(Qt.FramelessWindowHint, True)
+            # menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
+        else:
+            menu.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        # Match the context-list section-header convention: disabled + bold.
+        # Keeping the header as a menu action lets the native theme provide the
+        # correct text color in both light and dark themes.
+        header = QAction(QIcon(":/icons/bolt.svg"), trans("reasoning_effort.header"), menu)
+        header.setEnabled(False)
+        header_font = header.font()
+        header_font.setBold(True)
+        header.setFont(header_font)
+        menu.addAction(header)
+        menu.addSeparator()
+
+        # Exclusive QActionGroup makes QMenu render the choices with radio
+        # indicators instead of independent checkbox indicators.
+        effort_group = QActionGroup(menu)
+        effort_group.setExclusive(True)
+        for effort in efforts:
+            action = QAction(trans(f"reasoning_effort.{effort}"), menu)
+            action.setCheckable(True)
+            action.setChecked(effort == current)
+            effort_group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, value=effort: self.set_reasoning_effort(value)
+            )
+            menu.addAction(action)
+
+        # Keep a reference for the lifetime of the non-modal popup. QMenu will
+        # automatically choose another screen edge if the ideal point is invalid.
+        self._reasoning_effort_menu = menu
+        menu.aboutToHide.connect(self._clear_reasoning_effort_menu)
+        menu.adjustSize()
+        size = menu.sizeHint()
+        global_pos = btn.mapToGlobal(QPoint(btn.width() - size.width(), -size.height()))
+        menu.popup(global_pos)
+
+    def _clear_reasoning_effort_menu(self):
+        menu = self._reasoning_effort_menu
+        self._reasoning_effort_menu = None
+        if menu is not None:
+            menu.deleteLater()
+
+    def set_reasoning_effort(self, effort: str):
+        """Persist the single global effort value selected by the user."""
+        model = self.window.core.models.get(self.window.core.config.get("model"))
+        if self.window.core.models.set_reasoning_effort(effort, model=model, persist=True):
+            self.update_reasoning_effort()
 
     # -------------------- Left icon bar  --------------------
     # - Add icons: add_icon(...) or add_icons([...])
@@ -598,11 +1675,13 @@ class ChatInput(QTextEdit):
         self._update_icon_bar_geometry()
         self._apply_margins()
 
-    # -------------------- Right-bottom icon bar --------------------
-    # Independent bar anchored at the bottom-right corner of the input widget.
+    # -------------------- Bottom controls row --------------------
+    # Right-side controls live in a dedicated full-width row below the text
+    # viewport. This avoids both a permanent right-side text wall and any need
+    # for text-flow tricks around overlay buttons.
 
     def _init_icon_bar_right(self):
-        """Create the right-side icon bar pinned in the bottom-right corner."""
+        """Create the shared bottom row for left- and right-aligned controls."""
         self._icon_bar_right = QWidget(self)
         self._icon_bar_right.setObjectName("chatInputIconBarRight")
         self._icon_bar_right.setAttribute(Qt.WA_StyledBackground, True)
@@ -612,14 +1691,12 @@ class ChatInput(QTextEdit):
         """)
 
         layout = QHBoxLayout(self._icon_bar_right)
-        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(self._icons_spacing_right)
         self._icon_bar_right.setLayout(layout)
+        self._sync_right_row_layout()
+        layout.addStretch(1)
 
-        self._icon_bar_right.setFixedHeight(self._btn_size_right.height())
-        self._icon_bar_right.show()
-
-        self._reposition_icon_bar_right()
+        self._icon_bar_right.hide()
         self._update_icon_bar_geometry_right()
         self._apply_margins()
 
@@ -683,6 +1760,7 @@ class ChatInput(QTextEdit):
         # optional: no text
         btn.setText("")
 
+        btn.pressed.connect(self._activate_owner_column)
         if callback is not None:
             btn.clicked.connect(callback)
 
@@ -735,6 +1813,28 @@ class ChatInput(QTextEdit):
                 self.add_icon(key, icon, tooltip, callback, visible, alt_icon, alt_tooltip)
 
     # ---- Public API for icons (RIGHT-BOTTOM) ----
+
+    def add_bottom_left_icon(
+        self,
+        key: str,
+        icon: QIcon,
+        tooltip: str = "",
+        callback=None,
+        visible: bool = True,
+        alt_icon: Optional[QIcon] = None,
+        alt_tooltip: Optional[str] = None,
+    ) -> QPushButton:
+        """Add an icon pinned to the left side of the bottom controls row."""
+        self._bottom_left_icon_keys.add(key)
+        return self.add_right_icon(
+            key=key,
+            icon=icon,
+            tooltip=tooltip,
+            callback=callback,
+            visible=visible,
+            alt_icon=alt_icon,
+            alt_tooltip=alt_tooltip,
+        )
 
     def add_right_icon(
         self,
@@ -793,6 +1893,7 @@ class ChatInput(QTextEdit):
         btn.setFlat(True)
         btn.setText("")
 
+        btn.pressed.connect(self._activate_owner_column)
         if callback is not None:
             btn.clicked.connect(callback)
 
@@ -814,8 +1915,94 @@ class ChatInput(QTextEdit):
         self._apply_margins()
         return btn
 
+    def add_right_button(
+        self,
+        key: str,
+        text: str,
+        callback=None,
+        tooltip: str = "",
+        visible: bool = True,
+    ) -> QPushButton:
+        """Add a text button to the dedicated bottom row (after existing controls)."""
+        if key in self._icons_right:
+            btn = self._icons_right[key]
+            self._right_text_buttons.add(key)
+            btn.setText(text)
+            if tooltip:
+                btn.setToolTip(tooltip)
+            if callback is not None:
+                try:
+                    btn.clicked.disconnect()
+                except Exception:
+                    pass
+                btn.clicked.connect(callback)
+            btn.setHidden(not visible)
+            self._fit_right_text_button(btn)
+            self._rebuild_icon_layout_right()
+            self._update_icon_bar_geometry_right()
+            self._apply_margins()
+            return btn
+
+        btn = QPushButton(self._icon_bar_right)
+        btn.setObjectName(f"chatInputButtonRight_{key}")
+        btn.setText(text)
+        btn.setIcon(QIcon())
+        btn.setIconSize(QSize(0, 0))
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setToolTip(tooltip)
+        btn.setFixedHeight(self._btn_size_right.height())
+
+        btn.pressed.connect(self._activate_owner_column)
+        if callback is not None:
+            btn.clicked.connect(callback)
+
+        self._icons_right[key] = btn
+        self._icon_order_right.append(key)
+        self._right_text_buttons.add(key)
+        self._icon_meta_right[key] = {
+            "icon": QIcon(),
+            "alt_icon": None,
+            "tooltip": tooltip or key,
+            "alt_tooltip": None,
+            "active": False,
+        }
+
+        self._fit_right_text_button(btn)
+        btn.setHidden(not visible)
+        self._rebuild_icon_layout_right()
+        self._update_icon_bar_geometry_right()
+        self._apply_margins()
+        return btn
+
+    def _fit_right_text_button(self, btn: QPushButton):
+        """Fit an embedded text button to its translated label and active theme."""
+        btn.ensurePolished()
+        btn.setIconSize(QSize(0, 0))
+        btn.setFixedHeight(self._btn_size_right.height())
+        text_width = btn.fontMetrics().horizontalAdvance(btn.text())
+        btn.setFixedWidth(max(
+            self._btn_size_right.width(),
+            btn.sizeHint().width(),
+            text_width + 24,
+        ))
+
+    def refresh_right_bar(self):
+        """Refresh embedded text-button sizes and the dedicated bottom row."""
+        for key in tuple(self._right_text_buttons):
+            btn = self._icons_right.get(key)
+            if btn is None:
+                continue
+            if key == self.MODEL_SELECTOR_KEY and hasattr(btn, 'fit_to_content'):
+                btn.fit_to_content()
+            else:
+                self._fit_right_text_button(btn)
+        self._update_icon_bar_geometry_right()
+        self._reposition_icon_bar_right()
+        self._apply_margins()
+
     def add_right_icons(self, items):
-        """Add multiple right-bottom icons at once."""
+        """Add multiple icons to the dedicated bottom controls row."""
         for it in items:
             if isinstance(it, dict):
                 self.add_right_icon(
@@ -862,6 +2049,8 @@ class ChatInput(QTextEdit):
         # Right-bottom bar
         btn = self._icons_right.pop(key, None)
         if btn is not None:
+            self._bottom_left_icon_keys.discard(key)
+            self._right_text_buttons.discard(key)
             self._icon_meta_right.pop(key, None)
             try:
                 self._icon_order_right.remove(key)
@@ -875,7 +2064,7 @@ class ChatInput(QTextEdit):
 
     def set_icon_visible(self, key: str, visible: bool):
         """
-        Show or hide an icon by key; margins are recalculated.
+        Show or hide an icon by key; layout margins are recalculated.
 
         :param key: icon key
         :param visible: True to show, False to hide
@@ -942,7 +2131,7 @@ class ChatInput(QTextEdit):
 
     def set_right_icon_order(self, keys):
         """
-        Set rendering order for RIGHT-BOTTOM icons by a list of keys.
+        Set rendering order for icons in the bottom controls row.
         Icons not listed keep their relative order at the end.
 
         :param keys: list of icon keys in desired order
@@ -1124,7 +2313,7 @@ class ChatInput(QTextEdit):
         btn_size: Optional[Union[QSize, Tuple[int, int], int]] = None,
     ):
         """
-        Public API: change sizes for right-bottom icons.
+        Public API: change sizes for icons in the bottom controls row.
         - icon_size: QSize | (w, h) | int (square)
         - btn_size : QSize | (w, h) | int (square)
         Applies to existing right icons immediately.
@@ -1146,13 +2335,24 @@ class ChatInput(QTextEdit):
         self._icon_size_right = new_icon_sz
         self._btn_size_right = new_btn_sz
 
-        for btn in self._icons_right.values():
-            btn.setIconSize(self._icon_size_right)
-            btn.setFixedSize(self._btn_size_right)
+        for key, btn in self._icons_right.items():
+            if key == self.MODEL_SELECTOR_KEY:
+                btn.setIconSize(QSize(0, 0))
+                btn.setFixedHeight(self._btn_size_right.height())
+                btn.fit_to_content()
+            elif key == self.REASONING_EFFORT_KEY:
+                btn.setIconSize(QSize(0, 0))
+                btn.setFixedHeight(self._btn_size_right.height())
+            elif key in self._right_text_buttons:
+                self._fit_right_text_button(btn)
+            else:
+                btn.setIconSize(self._icon_size_right)
+                btn.setFixedSize(self._btn_size_right)
 
         if hasattr(self, "_icon_bar_right"):
             self._icon_bar_right.setFixedHeight(self._btn_size_right.height())
 
+        self.update_reasoning_effort()
         self._update_icon_bar_geometry_right()
         self._reposition_icon_bar_right()
         self._apply_margins()
@@ -1160,7 +2360,7 @@ class ChatInput(QTextEdit):
 
     def set_right_icon_px(self, icon_px: int, btn_px: Optional[int] = None):
         """
-        Convenience helper to set square sizes for right-bottom icons.
+        Convenience helper to set square sizes for bottom-row icons.
         """
         btn = btn_px if btn_px is not None else self._btn_size_right.height()
         self.set_right_icon_sizes(icon_px, btn)
@@ -1175,7 +2375,7 @@ class ChatInput(QTextEdit):
         offset_y: Optional[int] = None,
     ):
         """
-        Public API: change layout params for the right-bottom icon bar.
+        Public API: change layout params for the bottom controls row.
         - margin: inner padding from edges (px)
         - spacing: spacing between right-bar buttons (px)
         - offset_x: horizontal offset (+ rightwards, - leftwards)
@@ -1247,7 +2447,7 @@ class ChatInput(QTextEdit):
                 layout.addWidget(btn)
 
     def _rebuild_icon_layout_right(self):
-        """Rebuild the RIGHT-BOTTOM layout according to current _icon_order_right."""
+        """Rebuild the shared bottom row with left and right control groups."""
         if not hasattr(self, "_icon_bar_right"):
             return
         layout = self._icon_bar_right.layout()
@@ -1256,7 +2456,21 @@ class ChatInput(QTextEdit):
             w = item.widget()
             if w:
                 layout.removeWidget(w)
+
+        # Attachment / web-search stay at the far-left. One stretch separates
+        # them from model / reasoning / mic / send on the far-right.
         for k in self._icon_order_right:
+            if k not in self._bottom_left_icon_keys:
+                continue
+            btn = self._icons_right.get(k)
+            if btn:
+                layout.addWidget(btn)
+
+        layout.addStretch(1)
+
+        for k in self._icon_order_right:
+            if k in self._bottom_left_icon_keys:
+                continue
             btn = self._icons_right.get(k)
             if btn:
                 layout.addWidget(btn)
@@ -1283,15 +2497,51 @@ class ChatInput(QTextEdit):
         return w
 
     def _compute_icon_bar_right_width(self) -> int:
-        """
-        Compute width for right-bottom bar from button count.
-        """
+        """Compute width of the visible control group inside the bottom row."""
         vis = self._visible_buttons_right()
         if not vis:
             return 0
         count = len(vis)
-        w = count * self._btn_size_right.width() + (count - 1) * self._icons_spacing_right
+        w = sum(max(0, btn.width()) for btn in vis)
+        w += (count - 1) * self._icons_spacing_right
         return w
+
+    def _right_row_vertical_padding(self) -> tuple[int, int]:
+        """Return top/bottom padding for the dedicated controls row."""
+        total = max(0, int(self._icons_margin_right))
+        top = total // 2
+        bottom = total - top
+
+        # Preserve the old vertical-offset API: positive values move controls
+        # downward within the row, negative values move them upward.
+        offset = int(self._icons_offset_y_right)
+        top = max(0, top + offset)
+        bottom = max(0, bottom - offset)
+        return top, bottom
+
+    def _right_row_height(self) -> int:
+        """Return the height reserved below the text viewport for controls."""
+        vis = self._visible_buttons_right()
+        if not vis:
+            return 0
+        top, bottom = self._right_row_vertical_padding()
+        btn_h = max([btn.height() for btn in vis] or [self._btn_size_right.height()])
+        return max(0, btn_h + top + bottom)
+
+    def _sync_right_row_layout(self):
+        """Apply spacing and padding to the dedicated bottom controls row."""
+        if not hasattr(self, "_icon_bar_right"):
+            return
+        layout = self._icon_bar_right.layout()
+        if layout is None:
+            return
+        top, bottom = self._right_row_vertical_padding()
+        # Keep the left action group inset by the same base margin. The x
+        # offset remains a right-group adjustment, preserving the existing API.
+        left = max(0, int(self._icons_margin_right))
+        right = max(0, int(self._icons_margin_right) - int(self._icons_offset_x_right))
+        layout.setContentsMargins(left, top, right, bottom)
+        layout.setSpacing(self._icons_spacing_right)
 
     def _update_icon_bar_geometry(self):
         """Update the bar width and keep it raised above the text viewport."""
@@ -1303,11 +2553,12 @@ class ChatInput(QTextEdit):
         self._reposition_icon_bar()
 
     def _update_icon_bar_geometry_right(self):
-        """Update the right-bottom bar width and keep it raised above the text viewport."""
+        """Update the dedicated bottom-row geometry and visibility."""
         if not hasattr(self, "_icon_bar_right"):
             return
-        width = self._compute_icon_bar_right_width()
-        self._icon_bar_right.setFixedWidth(max(0, width))
+        self._sync_right_row_layout()
+        row_h = self._right_row_height()
+        self._icon_bar_right.setVisible(row_h > 0)
         self._icon_bar_right.raise_()
         self._reposition_icon_bar_right()
 
@@ -1322,40 +2573,162 @@ class ChatInput(QTextEdit):
             self._icon_bar.move(x, y)
 
     def _reposition_icon_bar_right(self):
-        """Keep the right-bottom icon bar pinned to the bottom-right corner."""
+        """Keep the dedicated controls row pinned below the text viewport."""
         if hasattr(self, "_icon_bar_right"):
             fw = self.frameWidth()
-            bar_w = self._compute_icon_bar_right_width()
-            bar_h = self._btn_size_right.height()
-            x = self.width() - fw - self._icons_margin_right - bar_w + self._icons_offset_x_right
-            y = self.height() - fw - self._icons_margin_right - bar_h + self._icons_offset_y_right
-            # Clamp inside widget bounds
-            x = max(0, min(self.width() - bar_w, x))
-            y = max(0, min(self.height() - bar_h, y))
-            self._icon_bar_right.move(x, y)
+            row_h = self._right_row_height()
+            width = max(0, self.width() - 2 * fw)
+            x = fw
+            y = max(fw, self.height() - fw - row_h)
+            self._icon_bar_right.setGeometry(x, y, width, row_h)
+
+    def install_record_bar(self, bar):
+        self.record_bar = bar
+        bar.setParent(self)
+        bar.hide()
+        bar.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, 'record_bar', None) and event.type() in (QEvent.Show, QEvent.Hide):
+            QTimer.singleShot(0, self._refresh_record_bar)
+        return super().eventFilter(watched, event)
+
+    def _record_bar_height(self):
+        bar = getattr(self, 'record_bar', None)
+        # 8 px above the meter, 2 px between it and the controls.
+        return bar.height() + 10 if bar is not None and not bar.isHidden() else 0
+
+    def _refresh_record_bar(self):
+        bar = getattr(self, 'record_bar', None)
+        recording_visible = bar is not None and not bar.isHidden()
+        if recording_visible:
+            if not hasattr(self, '_scroll_policy_before_recording'):
+                self._scroll_policy_before_recording = self.verticalScrollBarPolicy()
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        elif hasattr(self, '_scroll_policy_before_recording'):
+            self.setVerticalScrollBarPolicy(self._scroll_policy_before_recording)
+            del self._scroll_policy_before_recording
+        self._apply_margins()
+        self._position_record_bar()
+
+    def _position_record_bar(self):
+        bar = getattr(self, 'record_bar', None)
+        if bar is not None:
+            y = self.height() - self.frameWidth() - self._right_row_height() - self._record_bar_height() + 8
+            bar.setGeometry(12, max(0, y), max(0, self.width() - 24), bar.height())
+            bar.raise_()
+
+    def install_attachment_strip(self):
+        from pygpt_net.ui.widget.textarea.attachments import InputAttachments
+        self.attachment_strip = InputAttachments(self.window, self)
+        self._attachment_row_height = 0
+        self._attachment_splitter_sizes = None
+        self._attachment_base_input_height = 0
+        self.attachment_strip.heightChanged.connect(self._attachment_height_changed)
+
+    def _attachment_height_changed(self, height):
+        previous = self._attachment_row_height
+        splitter = self._get_main_splitter()
+        container, idx = self._find_container_in_splitter(splitter)
+        if splitter is not None and idx >= 0 and (height or previous):
+            if height and not previous:
+                self._attachment_splitter_sizes = list(splitter.sizes()) if self.isVisible() else None
+                self._attachment_pane_collapsible = splitter.isCollapsible(idx)
+            # A drag past the minimum can arm QSplitter's collapsed state.
+            # Disable collapse before changing any minimum, including on removal.
+            splitter.setCollapsible(idx, False)
+        if height and not previous:
+            # Before the window is shown, QTextEdit still has its provisional
+            # construction geometry. Never turn that height into a permanent
+            # minimum, or add a second band to persisted splitter sizes.
+            self._attachment_base_input_height = self.height() if self.isVisible() else self.minimumHeight()
+            self._attachment_base_minimum_height = self.minimumHeight()
+        window = getattr(self, "window", None)
+        if window is not None:
+            # Capture parent baselines before the editor includes the attachment
+            # band. Otherwise its height is counted again in every ancestor.
+            window.ui.chat.input.set_attachment_min_height(height)
+        if height:
+            self.setMinimumHeight(self._attachment_base_minimum_height + height)
+        elif previous:
+            self.setMinimumHeight(self._attachment_base_minimum_height)
+        self._attachment_row_height = height
+        if splitter is not None and idx >= 0:
+            if height and not previous and self._attachment_splitter_sizes:
+                sizes = list(self._attachment_splitter_sizes)
+                donor = 0 if idx != 0 else 1
+                delta = min(height, sizes[donor])
+                sizes[donor] -= delta
+                sizes[idx] += delta
+                splitter.setSizes(sizes)
+            elif not height and previous:
+                self._attachment_splitter_sizes = None
+                collapsible = self._attachment_pane_collapsible
+                # Restore the normal policy only after Qt has committed the
+                # lower minimum and the restored, visible splitter geometry.
+                def restore_policy():
+                    if self._attachment_row_height == 0:
+                        splitter.setCollapsible(idx, collapsible)
+                QTimer.singleShot(0, restore_policy)
+        self._apply_margins()
+        self._position_attachment_strip()
+        if height < previous:
+            self.fit_to_content()
+
+    def fit_to_content(self):
+        """Fit remaining text after removing an attachment, after layout settles."""
+        self._pending_fit_content = True
+        self._schedule_auto_resize(force=True)
+
+    def _position_attachment_strip(self):
+        strip = getattr(self, 'attachment_strip', None)
+        if strip is not None:
+            strip.setGeometry(12, 10, max(0, self.width() - 24), self._attachment_row_height)
+            strip.raise_()
 
     def _apply_margins(self):
-        """Reserve left space for visible icons and apply top text padding."""
-        # Also reserve right space for the bottom-right icon bar; keep bottom margin at 0 to avoid vertical shrink
+        """Reserve symmetric text inset plus the dedicated bottom controls row."""
         left_space = self._compute_icon_bar_width()
         if left_space > 0:
             left_space += self._icons_margin * 2
 
-        right_space = self._compute_icon_bar_right_width()
-        if right_space > 0:
-            right_space += self._icons_margin_right * 2
+        # Keep a small, symmetric horizontal inset for the editor text. On the
+        # left this aligns the text/placeholder with the attachment icon below;
+        # the same inset on the right keeps the text visually balanced.
+        horizontal_padding = max(0, int(self._text_horizontal_padding))
+        left_space += horizontal_padding
 
-        self.setViewportMargins(left_space, self._text_top_padding, right_space, 0)
+        # Bottom controls live in their own full-width row, so only the regular
+        # text inset is needed on the right.
+        bottom_space = self._right_row_height() + self._record_bar_height()
+        self.setViewportMargins(
+            left_space,
+            self._text_top_padding + getattr(self, "_attachment_row_height", 0),
+            horizontal_padding,
+            bottom_space,
+        )
 
-        # Reflow may change number of lines; adjust auto-height on next tick
+        # Reflow may change number of lines; adjust auto-height on next tick.
         try:
             QTimer.singleShot(0, self._schedule_auto_resize)
         except Exception:
             pass
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Hidden tab layouts have no reliable size hints. Reapply constraints
+        # after reparenting/showing the composer and Qt's layout activation.
+        def restore_attachment_geometry():
+            if self.isVisible() and getattr(self, '_attachment_row_height', 0):
+                self.window.ui.chat.input.set_attachment_min_height(self._attachment_row_height)
+                self._position_attachment_strip()
+        QTimer.singleShot(0, restore_attachment_geometry)
+
     def resizeEvent(self, event):
         """Resize event keeps the icon bar in place."""
         super().resizeEvent(event)
+        self._position_attachment_strip()
+        self._position_record_bar()
         try:
             self._reposition_icon_bar()
         except Exception:
@@ -1376,13 +2749,14 @@ class ChatInput(QTextEdit):
 
     def _ensure_splitter_hook(self):
         """Lazy-connect to main splitter to detect manual drags."""
-        if self._splitter_connected:
-            return
         splitter = self._get_main_splitter()
         if splitter is not None:
+            key = id(splitter)
+            if key in self._splitter_connections:
+                return
             try:
                 splitter.splitterMoved.connect(self._on_splitter_moved_by_user)
-                self._splitter_connected = True
+                self._splitter_connections.add(key)
             except Exception:
                 pass
 
@@ -1464,8 +2838,10 @@ class ChatInput(QTextEdit):
         doc_margin = float(self.document().documentMargin())
         min_viewport_h = int(math.ceil(2.0 * doc_margin + line_h))
         # Respect current minimum size hint to avoid jitter on some styles
-        min_hint = max(self.minimumSizeHint().height(), 0)
-        return max(min_hint, min_viewport_h + non_viewport_h)
+        min_hint = max(self.minimumSizeHint().height(), self.minimumHeight(), 0)
+        attachment_min = (getattr(self, "_attachment_base_minimum_height", 0)
+                          + getattr(self, "_attachment_row_height", 0)) if getattr(self, "_attachment_row_height", 0) else 0
+        return max(min_hint, min_viewport_h + non_viewport_h, attachment_min)
 
     def _max_input_widget_height_by_lines(self, non_viewport_h: int) -> int:
         """Max widget height allowed by line count cap."""
@@ -1484,9 +2860,8 @@ class ChatInput(QTextEdit):
     def _update_auto_height(self, force: bool = False, minimize_if_single: bool = False):
         """
         Core auto-resize routine:
-        - expand only when the input has focus (unless force=True),
-        - cap by max lines and 1/4 of main window height,
-        - shrink back to minimal only after send or when text is effectively one line.
+        - cap at 420 px or 40% of main window height,
+        - fit the current document on every edit, including deletion.
         """
         if self._auto_updating or self._splitter_resize_in_progress:
             return
@@ -1496,23 +2871,30 @@ class ChatInput(QTextEdit):
         if splitter is None or container is None or idx < 0:
             return  # Not yet attached to the splitter
 
-        # Expansion only with focus unless forced
-        has_focus = self.hasFocus()
-        can_expand = force or has_focus
         if self._user_adjusting_splitter and not force:
             return
 
         # Measure current layout and targets
         doc_h = self._document_content_height()
         non_viewport_h = self.height() - self.viewport().height()
+        # Attachment removal can resize the editor before Qt has resized its
+        # viewport. Never measure controls from that transient geometry alone.
+        margins = self.viewportMargins()
+        non_viewport_h = max(non_viewport_h, margins.top() + margins.bottom() + 2 * self.frameWidth())
         needed_input_h = int(math.ceil(doc_h + non_viewport_h))
         min_input_h = self._min_input_widget_height(non_viewport_h)
-        max_input_by_lines = self._max_input_widget_height_by_lines(non_viewport_h)
+        pending_bar = self.window.ui.nodes.get("input.pending")
+        if pending_bar is not None and pending_bar.active:
+            min_input_h = max(min_input_h, pending_bar.editor_height)
 
         # Container overhead above the inner QTextEdit
         container_overhead = max(0, container.height() - self.height())
         needed_container_h = needed_input_h + container_overhead
-        min_container_h = min_input_h + container_overhead
+        # Manually positioned composer children can briefly retain their old
+        # height when media mode reveals its prompt tabs. Include the layout's
+        # real minimum instead of relying only on that stale geometry.
+        min_container_h = max(min_input_h + container_overhead,
+                              container.minimumSizeHint().height(), container.minimumHeight())
 
         # Max cap by window fraction
         try:
@@ -1520,10 +2902,11 @@ class ChatInput(QTextEdit):
         except Exception:
             max_container_by_ratio = 0  # fallback disables ratio cap if window unavailable
 
-        max_container_by_lines = max_input_by_lines + container_overhead
-        cap_container_max = max_container_by_lines
+        cap_container_max = 420
         if max_container_by_ratio > 0:
             cap_container_max = min(cap_container_max, max_container_by_ratio)
+        cap_container_max = max(min_container_h, cap_container_max)
+        container.setMaximumHeight(cap_container_max)
 
         current_sizes = splitter.sizes()
         if idx >= len(current_sizes):
@@ -1532,16 +2915,16 @@ class ChatInput(QTextEdit):
 
         # Decide on action
         target_container_h = None
+        fit_content = getattr(self, '_pending_fit_content', False)
+        self._pending_fit_content = False
 
-        # Shrink only when requested or effectively single line
-        if minimize_if_single or self._should_shrink_to_min(doc_h):
+        if (force and minimize_if_single and not fit_content) or self._is_effectively_empty():
             if current_container_h > min_container_h + 1:
                 target_container_h = min_container_h
 
-        # Expand if focused (or forced), but only up to caps
-        elif can_expand:
-            desired = min(needed_container_h, cap_container_max)
-            if desired > current_container_h + 1:
+        else:
+            desired = max(min_container_h, min(needed_container_h, cap_container_max))
+            if abs(desired - current_container_h) > 1:
                 target_container_h = desired
 
         # Apply if needed
@@ -1581,10 +2964,12 @@ class ChatInput(QTextEdit):
                     break
 
         self._splitter_resize_in_progress = True
+        accepted_sizes = list(new_sizes)
         try:
             old_block = splitter.blockSignals(True)
             splitter.setSizes(new_sizes)
             splitter.blockSignals(old_block)
+            accepted_sizes = list(splitter.sizes())
         finally:
             self._splitter_resize_in_progress = False
 
@@ -1594,13 +2979,16 @@ class ChatInput(QTextEdit):
             if "input" in tabs:
                 t_idx = tabs['input'].currentIndex()
                 if t_idx != 0:
-                    self.window.controller.ui.splitter_output_size_files = new_sizes
+                    self.window.controller.ui.splitter_output_size_files = accepted_sizes
                 else:
-                    self.window.controller.ui.splitter_output_size_input = new_sizes
+                    self.window.controller.ui.splitter_output_size_input = accepted_sizes
         except Exception:
             pass
 
-        self._last_target_container_h = target_container_h
+        if idx < len(accepted_sizes):
+            self._last_target_container_h = accepted_sizes[idx]
+        else:
+            self._last_target_container_h = target_container_h
 
     def collapse_to_min(self):
         """Public helper to collapse input area to minimal height."""
@@ -1616,8 +3004,8 @@ class ChatInput(QTextEdit):
             return True
 
     def _set_text_and_move_end(self, text: str):
-        """Set text and move cursor to the end."""
-        self.setPlainText(text or "")
+        """Set durable history text and restore UI mention anchors."""
+        self.set_mention_text(text or "")
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.setTextCursor(cursor)
@@ -1627,9 +3015,9 @@ class ChatInput(QTextEdit):
         if self._history_active:
             return
         try:
-            self._history_saved_current = self.toPlainText()
+            self._history_saved_current = self.serialize_mentions()
         except Exception:
-            self._history_saved_current = ""
+            self._history_saved_current = self.toPlainText()
         self._history_active = True
         self._history_index = len(self._history)
 

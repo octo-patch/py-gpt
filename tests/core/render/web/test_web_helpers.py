@@ -10,6 +10,7 @@
 # ================================================== #
 import re
 import html
+import json
 import pytest
 from unittest.mock import MagicMock
 from pygpt_net.core.render.web.helpers import Helpers
@@ -91,9 +92,35 @@ def test_format_cmd_text():
     out = h.format_cmd_text(inp)
     assert out == exp
 
+
+def test_format_cmd_data_unpacks_nested_json_and_preserves_unicode():
+    h = Helpers()
+    # Mirror tool_result: an outer JSON object whose request/result fields are
+    # themselves serialized JSON strings.
+    inp = json.dumps({
+        "request": json.dumps({"query": "Łódź"}),
+        "result": json.dumps([{"text": "Zażółć gęślą jaźń. Ł ś Ó"}]),
+    })
+
+    out = h.format_cmd_data(inp, indent=True)
+
+    assert "Łódź" in out
+    assert "Zażółć gęślą jaźń. Ł ś Ó" in out
+    assert "\\u0141" not in out
+    assert '"request": {' in out
+    assert '"result": [' in out
+
 def test_format_chunk():
     h = Helpers()
     inp = "line1\nline2"
     exp = "line1\nline2"
     out = h.format_chunk(inp)
     assert out == exp
+
+
+def test_pre_format_text_workdir_uses_local_url(dummy_window):
+    dummy_window.core.filesystem.get_local_url.return_value = "file:///C:/Users/marcin/Desktop/img/test.png"
+    h = Helpers(window=dummy_window)
+    out = h.pre_format_text("[Open](%workdir%/img/test.png)")
+    assert out == "[Open](file:///C:/Users/marcin/Desktop/img/test.png)"
+    dummy_window.core.filesystem.get_local_url.assert_called_once_with("%workdir%/img/test.png", ctx=None)

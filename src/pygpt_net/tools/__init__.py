@@ -11,6 +11,7 @@
 
 from typing import Dict, Optional
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QAction
 
 from pygpt_net.ui.widget.dialog.base import BaseDialog
@@ -18,13 +19,16 @@ from pygpt_net.core.events import BaseEvent
 from .base import BaseTool
 
 
-class Tools:
+class Tools(QObject):
+    registered = Signal(object)
+
     def __init__(self, window=None):
         """
         Tools manager
 
         :param window: Window instance
         """
+        super().__init__()
         self.window = window
         self.tools = {}
         self.initialized = False
@@ -37,6 +41,7 @@ class Tools:
         """
         self.tools[tool.id] = tool
         self.tools[tool.id].attach(self.window)
+        self.registered.emit(tool)
 
     def get(self, id: str) -> BaseTool:
         """
@@ -127,6 +132,13 @@ class Tools:
         for id in self.tools:
             self.tools[id].setup_theme()
 
+    def get_dialog_tool(self, dialog_type: str):
+        """Find the policy owner of a static dialog or dynamic dialog type."""
+        for tool in self.tools.values():
+            if dialog_type == tool.dialog_id or dialog_type in tool.dialog_types:
+                return tool
+        return None
+
     def get_instance(
             self,
             type_id: str,
@@ -139,10 +151,25 @@ class Tools:
         :param dialog_id: dialog instance ID
         :return: BaseDialog instance or None
         """
+        owner = self.get_dialog_tool(type_id)
+        if owner is not None:
+            dialog_id = owner.resolve_dialog_id(dialog_id)
+            if dialog_id is None:
+                return None
+            if dialog_id in self.window.ui.dialog:
+                return self.window.ui.dialog[dialog_id]
         for id in self.tools:
+            tool = self.tools[id]
+            if not tool.can_open_dialog():
+                continue
             instance = self.tools[id].get_instance(type_id, dialog_id)
             if instance is not None:
                 return instance
+
+    def apply_lang_mappings(self):
+        """Refresh runtime language mappings registered by all tools."""
+        for id in self.tools:
+            self.tools[id].apply_lang_mappings()
 
     def get_lang_mappings(self) -> Dict[str, dict]:
         """
@@ -152,12 +179,21 @@ class Tools:
         """
         mappings = {}
         for id in self.tools:
-            tool_mappings = self.tools[id].get_lang_mappings()
+            tool = self.tools[id]
+            tool_mappings = tool.get_lang_mappings()
             if tool_mappings and isinstance(tool_mappings, dict):
-                for key in tool_mappings:
+                domain = tool.get_locale_domain() if hasattr(tool, 'get_locale_domain') else None
+                for key, values in tool_mappings.items():
+                    scoped = values
+                    if domain and isinstance(values, dict):
+                        scoped = {
+                            target: {"key": locale_key, "domain": domain}
+                            if isinstance(locale_key, str) else locale_key
+                            for target, locale_key in values.items()
+                        }
                     if key not in mappings:
-                        mappings[key] = tool_mappings[key]
+                        mappings[key] = scoped
                     else:
-                        mappings[key].update(tool_mappings[key])
+                        mappings[key].update(scoped)
         return mappings
         

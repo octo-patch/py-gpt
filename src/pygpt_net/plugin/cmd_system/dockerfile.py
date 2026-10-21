@@ -1,0 +1,1 @@
+from pygpt_net.plugin.filesystem.python.dockerfile import PYTHON_LEGACY_DOCKERFILE as SYSTEM_DOCKERFILE

@@ -77,10 +77,10 @@ def test_update_tab(mock_window):
     attachment = Attachment(mock_window)
     mock_window.core.config.data['mode'] = 'vision'
     mock_window.core.attachments.count = MagicMock(return_value=1)
-    mock_window.ui.tabs['input'].setTabText = MagicMock()
+    mock_window.ui.tabs['input'].set_compact_tab_count = MagicMock()
     attachment.update_tab('vision')
-    mock_window.core.attachments.count.assert_called_once()
-    mock_window.ui.tabs['input'].setTabText.assert_called_once()
+    mock_window.core.attachments.count.assert_called_once_with('vision')
+    mock_window.ui.tabs['input'].set_compact_tab_count.assert_called_once_with(1, 1)
 
 
 def test_select(mock_window):
@@ -191,26 +191,24 @@ def test_clear_assistant(mock_window):
 
 def test_open_dir(mock_window):
     attachment = Attachment(mock_window)
-    att = AttachmentItem
-    att.path = "path"
+    att = AttachmentItem(path="path")
     with patch('os.path.exists') as os_path_exists:
         os_path_exists.return_value=True
-        mock_window.controller.files.open_in_file_manager = MagicMock()
+        mock_window.tools.get("files").paths.open_in_manager = MagicMock()
         mock_window.core.attachments.get_by_id = MagicMock(return_value=att)
         attachment.open_dir('assistant', 1)
-        mock_window.controller.files.open_dir.assert_called_once()
+        mock_window.tools.get("files").paths.reveal.assert_called_once()
 
 
 def test_open(mock_window):
     attachment = Attachment(mock_window)
-    att = AttachmentItem
-    att.path = "path"
+    att = AttachmentItem(path="path")
     with patch('os.path.exists') as os_path_exists:
         os_path_exists.return_value=True
-        mock_window.controller.files.open = MagicMock()
+        mock_window.tools.get("files").paths.open = MagicMock()
         mock_window.core.attachments.get_by_id = MagicMock(return_value=att)
         attachment.open('assistant', 1)
-        mock_window.controller.files.open.assert_called_once()
+        mock_window.tools.get("files").paths.open.assert_called_once()
 
 
 def test_has(mock_window):

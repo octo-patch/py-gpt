@@ -50,7 +50,27 @@ class RemoteTools:
             return False
         if tool_name == "web_search":
             return self.is_web(model)
-        return False
+        provider = self.window.core.llm.get(model.provider)
+        return provider is not None and provider.is_remote_tool_enabled(tool_name)
+
+    def supported(self, model: Union[ModelItem, str], tool_name: str) -> bool:
+        """Return whether a model supports the selected provider-native tool.
+
+        The Web Search check is deliberately forward-compatible: only known
+        unsupported legacy families are rejected.  Unknown/new model IDs are
+        accepted by default so they can use remote Web Search without waiting
+        for a PyGPT model-registry update.
+
+        :param model: ModelItem or model name
+        :param tool_name: Tool name
+        :return: True if the remote tool may be used
+        """
+        if isinstance(model, str):
+            model = self.window.core.models.get(model)
+        if not model:
+            return False
+        provider = self.window.core.llm.get(model.provider)
+        return provider is not None and provider.supports_remote_tool(model, tool_name)
 
     def is_web(self, model: ModelItem) -> bool:
         """
@@ -59,23 +79,9 @@ class RemoteTools:
         :param model: ModelItem
         :return: True if web search is enabled, False otherwise
         """
-        # at first, check provider-specific config
-        cfg_get = self.window.core.config.get
-        state = False
-        if model.provider == "openai":  # native SDK, responses API
-            state = cfg_get("remote_tools.web_search", False)
-        elif model.provider == "google":  # native SDK
-            state = cfg_get("remote_tools.google.web_search", False)
-        elif model.provider == "anthropic":  # native SDK
-            state = cfg_get("remote_tools.anthropic.web_search", False)
-        elif model.provider == "x_ai":  # native SDK
-            state = cfg_get("remote_tools.xai.web_search", False)
-
-        # if not enabled by default or other provider, then use global config
-        if not state:
-            state = self.enabled_global["web_search"]
-
-        return state
+        provider = self.window.core.llm.get(model.provider)
+        state = provider is not None and provider.is_remote_tool_enabled("web_search")
+        return bool(state or self.enabled_global["web_search"])
 
     def update_icons(self):
         """
@@ -102,10 +108,8 @@ class RemoteTools:
             state = not self.enabled_global["web_search"]
             self.enabled_global["web_search"] = state
             cfg_set("remote_tools.global.web_search", state)
-            cfg_set("remote_tools.web_search", state)
-            cfg_set("remote_tools.google.web_search", state)
-            cfg_set("remote_tools.anthropic.web_search", state)
-            cfg_set("remote_tools.xai.web_search", state)
+            for provider in self.window.core.llm.llms.values():
+                provider.set_remote_tool_enabled("web_search", state)
 
         # save config
         self.window.core.config.save()

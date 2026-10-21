@@ -23,17 +23,50 @@ def mock_get(key):
         return 200
 
 
-def test_from_str():
+def test_from_str(monkeypatch):
     """Test from_str"""
     text = "This is a test"
-    Tokens.from_str = MagicMock(return_value=4)
+    from_str_mock = MagicMock(return_value=4)
+    monkeypatch.setattr(Tokens, "from_str", from_str_mock)
     assert Tokens.from_str(text, 'gpt-3.5') == 4
+    from_str_mock.assert_called_once_with(text, 'gpt-3.5')
 
 
 def test_get_extra():
     """Test get_extra"""
     model = "gpt-4-0613"
     assert Tokens.get_extra() == 3
+
+
+def test_current_counter_counts_late_plugin_system_instructions():
+    from pygpt_net.core.events import Event
+    window = MagicMock()
+    config = {'mode': 'chat', 'model': 'test-model', 'prompt': 'base',
+              'max_total_tokens': 1000, 'context_threshold': 0}
+    window.core.config.get.side_effect = lambda key, default=None: config.get(key, default)
+    window.core.models.get.return_value.id = 'test-model'
+    window.core.models.get_num_ctx.return_value = 1000
+    window.core.ctx.count_prompt_items.return_value = (0, 0)
+    window.core.ctx.count_items.return_value = 0
+    current = CtxItem()
+    current.extra = {'agents_v2_filesystem_context': 'keep original state'}
+    window.core.ctx.get_last_item.return_value = current
+    window.core.prompt.build_final_system_prompt.side_effect = lambda prompt, *_: prompt
+    window.core.context_manager.prepare_system_prompt.side_effect = lambda prompt, *_args, **_kwargs: prompt
+
+    def dispatch(event):
+        assert event.name == Event.POST_PROMPT_END
+        assert event.data['preview'] and event.data['silent']
+        event.ctx.extra.pop('agents_v2_filesystem_context')
+        event.data['value'] += ' filesystem instructions'
+
+    window.dispatch.side_effect = dispatch
+    tokens = Tokens(window)
+    tokens.from_prompt = MagicMock(side_effect=lambda text, *_: len(text))
+    result = tokens.get_current('')
+    assert result[1] >= len('base filesystem instructions')
+    assert window.core.ctx.current_sys_prompt == 'base filesystem instructions'
+    assert current.extra == {'agents_v2_filesystem_context': 'keep original state'}
 
 
 def test_from_prompt():
@@ -84,8 +117,9 @@ def test_from_ctx():
     item.output_timestamp = 2
 
     model = "gpt-4-0613"
-    with patch('pygpt_net.core.tokens.tokens.Tokens.from_str', return_value=8):
-        assert Tokens.from_ctx(item, 'chat', model) == 40
+    with patch('pygpt_net.core.tokens.tokens.Tokens.from_str', return_value=8), \
+            patch('pygpt_net.core.tokens.tokens.Tokens._const_tokens', return_value=1):
+        assert Tokens.from_ctx(item, 'chat', model) == 42
 
 
 def test_get_config():

@@ -19,7 +19,6 @@ tmp/
 mp4/
 eggs/
 .eggs/
-parts/
 sdist/
 var/
 wheels/
@@ -142,3 +141,6 @@ dmypy.json
 /AppDir
 /appimage-build
 *.squashfs
+
+# flatpak
+/.flatpak-builder

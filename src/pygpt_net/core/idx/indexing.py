@@ -6,26 +6,28 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.21 07:00:00                  #
+# Updated Date: 2026.09.27 17:35:00                  #
 # ================================================== #
 
+from __future__ import annotations
 import datetime
 import os
 import time
 
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+import copy
+from typing import TYPE_CHECKING, Optional, Tuple, List, Dict, Any
 
 from sqlalchemy import text
 
-from llama_index.core.indices.base import BaseIndex
-from llama_index.core.schema import Document
-from llama_index.core import SimpleDirectoryReader
 
 from pygpt_net.item.model import ModelItem
-from pygpt_net.provider.loaders.base import BaseLoader
+from pygpt_net.provider.loaders.base import BaseLoader, normalize_field
 from pygpt_net.utils import parse_args, pack_arg
 
+if TYPE_CHECKING:
+    from llama_index.core.indices.base import BaseIndex
+    from llama_index.core.schema import Document
 
 class Indexing:
     def __init__(self, window=None):
@@ -78,7 +80,16 @@ class Indexing:
                 if loader.instructions:
                     for item in loader.instructions:
                         cmd = list(item.keys())[0]
-                        self.external_instructions[cmd] = item[cmd]
+                        instruction = copy.deepcopy(item[cmd])
+                        domain = loader.get_locale_domain() if hasattr(loader, 'get_locale_domain') else None
+                        if domain and isinstance(instruction, dict):
+                            instruction['_locale_domain'] = domain
+                            args = instruction.get('args', {})
+                            if isinstance(args, dict):
+                                for arg in args.values():
+                                    if isinstance(arg, dict):
+                                        arg.setdefault('_locale_domain', domain)
+                        self.external_instructions[cmd] = instruction
                 if loader.init_args:
                     for key in loader.init_args:
                         if loader.id not in self.external_config:
@@ -89,16 +100,21 @@ class Indexing:
                             "type": "str",  # default = str
                             "label": key,
                             "description": None,
+                            "required": getattr(loader, 'init_args_required', {}).get(key, False),
+                            "_locale_domain": loader.get_locale_domain()
+                            if hasattr(loader, 'get_locale_domain') else None,
                         }
                         # from config
                         if key in loader.args:
                             self.external_config[loader.id][key]["value"] = loader.args[key]
-                        if key in loader.init_args_types:
-                            self.external_config[loader.id][key]["type"] = loader.init_args_types[key]
                         if key in loader.init_args_labels:
                             self.external_config[loader.id][key]["label"] = loader.init_args_labels[key]
                         if key in loader.init_args_desc:
                             self.external_config[loader.id][key]["description"] = loader.init_args_desc[key]
+                        self.external_config[loader.id][key].update(
+                            normalize_field(loader.init_args_types.get(key, 'str')))
+                        # Saved values (including False) always precede reader defaults.
+                        self.external_config[loader.id][key]['value'] = loader.args.get(key, loader.init_args[key])
 
             except ImportError as e:
                 msg = f"Error while registering data loader: {loader.id} - {e}"
@@ -116,45 +132,30 @@ class Indexing:
             return self.data_providers[loader]
         return None
 
-    def update_loader_args(
-            self,
-            loader: str,
-            args: Dict[str, Any]
-    ):
-        """
-        Update loader arguments
-
-        :param loader: loader id
-        :param args: keyword arguments
-        """
-        if loader in self.data_providers:
-            self.data_providers[loader].set_args(args)
-            reader = self.data_providers[loader]  # get data reader instance
-            self.loaders["web"][loader] = reader  # update reader instance
-
-            # update in config
-            config = self.window.core.config.get("llama.hub.loaders.args")
-            if config is None:
-                config = []
-            loader_key = "web_" + loader
-            for arg in args:
-                found = False
-                for item in config:
-                    if item["loader"] == loader_key and item["name"] == arg:
-                        item["value"] = args[arg]
-                        found = True
-                if not found:
-                    type = "str"
-                    if arg in self.data_providers[loader].init_args_types:
-                        type = self.data_providers[loader].init_args_types[arg]
-                    # pack value
-                    value = pack_arg(args[arg], type)
-                    config.append({
-                        "loader": loader_key,
-                        "name": arg,
-                        "value": value,
-                        "type": type
-                    })
+    def update_loader_args(self, loader: str, args: Dict[str, Any], remove=()):
+        """Update runtime and saved reader arguments, preserving other loaders."""
+        provider = self.data_providers.get(loader)
+        if provider is None:
+            return
+        stored = self.window.core.config.get("llama.hub.loaders.args")
+        stored = copy.deepcopy(stored) if isinstance(stored, list) else []
+        loader_key = "web_" + loader
+        changed = set(args) | set(remove)
+        stored = [item for item in stored
+                  if item.get('loader') != loader_key or item.get('name') not in changed]
+        for key, value in args.items():
+            kind = normalize_field(provider.init_args_types.get(key, 'str'))['type']
+            stored.append({'loader': loader_key, 'name': key,
+                           'value': pack_arg(value, kind), 'type': kind})
+        if hasattr(self.window.core.config, 'set'):
+            self.window.core.config.set("llama.hub.loaders.args", stored)
+        elif hasattr(self.window.core.config, 's'):
+            self.window.core.config.s["llama.hub.loaders.args"] = stored
+        values = self.get_loader_arguments(loader, 'web')
+        provider.set_args(values)
+        self.loaders['web'][loader] = provider
+        for key, field in self.external_config.get(loader, {}).items():
+            field['value'] = values.get(key, provider.init_args.get(key))
 
     def reload_loaders(self):
         """Reload loaders (update arguments)"""
@@ -255,18 +256,25 @@ class Indexing:
         :param path: file path
         :return: True if excluded
         """
-        data_dir = self.window.core.config.get_user_dir("data")
-        # interpreter files
-        excluded = [
-            os.path.join(data_dir, ".interpreter.output.py"),
-            os.path.join(data_dir, ".interpreter.input.py"),
-            os.path.join(data_dir, ".interpreter.current.py"),
-            os.path.join(data_dir, ".interpreter.kernel.json"),
-            os.path.join(data_dir, ".canvas.html"),
+        return path in self.excluded_paths()
+
+    def excluded_paths(self, data_dir=None):
+        """Snapshot reserved runtime files once for background discovery."""
+        if data_dir is None:
+            data_dir = self.window.core.filesystem.get_data_dir()
+        tmp_dir = self.window.core.config.get_user_dir("tmp")
+        # interpreter/canvas temporary files; keep legacy data paths excluded too
+        names = [
+            ".interpreter.output.py",
+            ".interpreter.input.py",
+            ".interpreter.current.py",
+            ".interpreter.output.json",
+            ".interpreter.kernel.json",
+            ".canvas.html",
         ]
-        if path in excluded:
-            return True
-        return False
+        excluded = [os.path.join(tmp_dir, name) for name in names]
+        excluded.extend(os.path.join(data_dir, name) for name in names)
+        return frozenset(excluded)
 
     def is_allowed(self, path: str) -> bool:
         """
@@ -303,16 +311,31 @@ class Indexing:
         :param loader_kwargs: additional keyword arguments for loader
         :return: list of documents
         """
+        from llama_index.core import SimpleDirectoryReader
+
         # TODO: if .zip then unpack here, and return path to /tmp
         if not silent:
             self.window.core.idx.log(f"Reading documents from path: {path}")
         if os.path.isdir(path):
-            reader = SimpleDirectoryReader(
-                input_dir=path,
-                recursive=True,
-                exclude_hidden=False,
-            )
-            documents = reader.load_data()
+            # Do not let SimpleDirectoryReader choose its own default readers here.
+            # That bypasses PyGPT's registered/configured loaders (notably the
+            # video/audio loader) and may instantiate optional readers such as
+            # LlamaIndex VideoAudioReader, which requires a local Whisper install.
+            # Route every file through get_documents() instead, so the same loader
+            # selection and exclusion rules are used for files and directories.
+            documents = []
+            for root, dirs, files in os.walk(path):
+                dirs.sort()
+                files.sort()
+                for name in files:
+                    file_path = os.path.join(root, name)
+                    documents.extend(self.get_documents(
+                        file_path,
+                        force=force,
+                        silent=silent,
+                        loader_kwargs=loader_kwargs,
+                    ))
+            return documents
         else:
             # get extension
             ext = os.path.splitext(path)[1][1:].lower()
@@ -382,7 +405,8 @@ class Indexing:
             self,
             url: str,
             type: str = "webpage",
-            extra_args: Optional[Dict[str, Any]] = None
+            extra_args: Optional[Dict[str, Any]] = None,
+            raise_on_error: bool = False,
     ) -> Tuple[str, List[Document]]:
         """
         Get content from external resource
@@ -392,7 +416,8 @@ class Indexing:
         :param extra_args: extra arguments for loader
         :return: text content, list of documents
         """
-        docs = self.read_web(url, type, extra_args)
+        docs = (self.read_web(url, type, extra_args, raise_on_error=True)
+                if raise_on_error else self.read_web(url, type, extra_args))
         data = []
         for doc in docs:
             data.append(doc.text)
@@ -403,6 +428,7 @@ class Indexing:
             url: str,
             type: str = "webpage",
             extra_args: Optional[Dict[str, Any]] = None,
+            raise_on_error: bool = False,
     ) -> List[Document]:
         """
         Read data from external resource
@@ -418,6 +444,7 @@ class Indexing:
         if type not in self.loaders["web"]:
             raise ValueError("No web loader for type: {}".format(type))
 
+        extra_args = dict(extra_args or {})
         try:
             if "url" not in extra_args:
                 extra_args["url"] = url
@@ -435,6 +462,8 @@ class Indexing:
             )
         except Exception as e:
             self.window.core.debug.log(e)
+            if raise_on_error:
+                raise
         return documents
 
     def prepare_document(self, doc: Document):
@@ -625,6 +654,8 @@ class Indexing:
         :param updated_ts: timestamp
         :return: list of documents
         """
+        from llama_index.core.schema import Document
+
         db = self.window.core.db.get_db()
         documents = []
         query = f"""
@@ -697,6 +728,8 @@ class Indexing:
         :param updated_ts: timestamp from which to get data
         :return: list of documents
         """
+        from llama_index.core.schema import Document
+
         db = self.window.core.db.get_db()
         documents = []
         query = f"""
@@ -726,6 +759,106 @@ class Indexing:
                 )
                 documents.append(doc)
         return documents
+
+    def get_project_db_data(
+            self,
+            group_id: int,
+            idx: str,
+            last_item: int = 0
+    ) -> List[Document]:
+        """Get project conversation items after the project cursor.
+
+        Contexts indexed manually into the same project index are skipped when
+        their tracked idx_ctx timestamp is newer than the context item. This
+        prevents a later project-wide incremental update from inserting the
+        manually indexed conversation a second time.
+        """
+        from llama_index.core.schema import Document
+
+        db = self.window.core.db.get_db()
+        documents = []
+        store = self.window.core.idx.get_current_store()
+        stmt = text("""
+            SELECT
+                'Human: ' || ctx_item.input || '\nAssistant: ' || ctx_item.output AS text,
+                ctx_item.input_ts AS input_ts,
+                ctx_item.meta_id AS meta_id,
+                ctx_item.id AS item_id
+            FROM ctx_item
+            INNER JOIN ctx_meta ON ctx_item.meta_id = ctx_meta.id
+            WHERE ctx_meta.group_id = :group_id
+              AND ctx_item.id > :last_item
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM idx_ctx
+                  WHERE idx_ctx.store = :store
+                    AND idx_ctx.idx = :idx
+                    AND idx_ctx.meta_id = ctx_item.meta_id
+                    AND idx_ctx.updated_ts >= MAX(
+                        COALESCE(ctx_item.input_ts, 0),
+                        COALESCE(ctx_item.output_ts, 0)
+                    )
+              )
+            ORDER BY ctx_item.id ASC
+        """).bindparams(
+            group_id=int(group_id),
+            idx=str(idx),
+            store=str(store),
+            last_item=int(last_item or 0),
+        )
+        with db.connect() as connection:
+            for row in connection.execute(stmt):
+                data = row._asdict()
+                doc = Document(
+                    text=data["text"],
+                    metadata={
+                        "ctx_date": str(datetime.datetime.fromtimestamp(int(data["input_ts"]))),
+                        "ctx_id": data["meta_id"],
+                        "item_id": data["item_id"],
+                        "project_id": int(group_id),
+                        "indexed_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
+                documents.append(doc)
+        return documents
+
+    def index_db_project(
+            self,
+            idx: str,
+            index: BaseIndex,
+            group_id: int,
+            last_item: int = 0
+    ) -> Tuple[int, List[str], int, int]:
+        """Index one project's DB context incrementally by ctx_item ID."""
+        errors = []
+        n = 0
+        max_meta = 0
+        max_item = int(last_item or 0)
+        try:
+            documents = self.get_project_db_data(group_id, idx, last_item)
+            self.window.core.idx.log(
+                f"Indexing project {group_id} to {idx} from item: {last_item}"
+            )
+            for d in documents:
+                if self.is_stopped():
+                    break
+                self.index_document(index, d)
+                meta_id = int(d.metadata.get("ctx_id", 0) or 0)
+                item_id = int(d.metadata.get("item_id", 0) or 0)
+                self.window.core.ctx.idx.set_meta_as_indexed(
+                    meta_id, idx, d.id_, update_timestamp=False
+                )
+                max_meta = max(max_meta, meta_id)
+                max_item = max(max_item, item_id)
+                n += 1
+                self.window.core.idx.log(
+                    f"Inserted project DB document: {n} / {len(documents)}, "
+                    f"item: {item_id}, id: {d.id_}"
+                )
+        except Exception as e:
+            errors.append(str(e))
+            self.window.core.debug.log(e)
+        return n, errors, max_meta, max_item
 
     def index_db_by_meta_id(
             self,

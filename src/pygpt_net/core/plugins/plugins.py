@@ -17,7 +17,7 @@ from typing import Optional, Dict, List, Any
 
 from pygpt_net.provider.core.plugin_preset.json_file import JsonFileProvider
 from pygpt_net.plugin.base.plugin import BasePlugin
-from pygpt_net.utils import trans
+from pygpt_net.utils import trans, register_locale_domain
 
 
 class Plugins:
@@ -106,27 +106,37 @@ class Plugins:
 
         :param plugin: plugin instance
         """
-        plugin.attach(self.window)
         plugin_id = plugin.id
+        self._register_locale_domain(plugin)
+        plugin.attach(self.window)
         self.plugins[plugin_id] = plugin
 
         if hasattr(plugin, 'options'):
             self.plugins[plugin_id].initial_options = copy.deepcopy(plugin.options)
 
         try:
-            removed = False
+            changed = False
             cfg = self.window.core.config
             plugins_cfg = cfg.get('plugins')
             if plugin_id in plugins_cfg:
                 p_cfg = plugins_cfg[plugin_id]
                 for key in list(p_cfg):
                     if hasattr(self.plugins[plugin_id], 'options') and key in self.plugins[plugin_id].options:
-                        self.plugins[plugin_id].options[key]['value'] = p_cfg[key]
+                        option = self.plugins[plugin_id].options[key]
+                        stored = p_cfg[key]
+                        if option.get('type') == 'cmd':
+                            enabled = self._cmd_enabled(option, stored)
+                            self._set_cmd_enabled(option, enabled)
+                            if not isinstance(stored, bool) or stored != enabled:
+                                p_cfg[key] = enabled
+                                changed = True
+                        else:
+                            option['value'] = stored
                     else:
-                        removed = True
+                        changed = True
                         del p_cfg[key]
 
-            if removed:
+            if changed:
                 cfg.save()
 
             self.register_options(plugin_id, self.plugins[plugin_id].options if hasattr(self.plugins[plugin_id], 'options') else {})
@@ -134,9 +144,35 @@ class Plugins:
             self.window.core.debug.log(e)
             print('Error while loading plugin options: {}'.format(plugin_id))
 
+    def _register_locale_domain(self, plugin: BasePlugin):
+        """Register the physical locale directory behind a plugin's logical domain."""
+        if not getattr(plugin, 'use_locale', False):
+            return
+
+        domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else None
+        path = plugin.get_locale_dir() if hasattr(plugin, 'get_locale_dir') else None
+
+        # Built-in plugins use one directory per plugin. Add-on plugins arrive
+        # here with their own domain/path already assigned by Extensions.
+        if not domain:
+            domain = f'plugin.{plugin.id}'
+        if not path and domain == f'plugin.{plugin.id}':
+            path = os.path.join(
+                self.window.core.config.get_app_path(),
+                'data', 'locale', 'plugin', plugin.id,
+            )
+
+        if hasattr(plugin, 'set_locale_domain'):
+            plugin.set_locale_domain(domain, path)
+        else:
+            plugin.locale_domain = domain
+            plugin.locale_dir = path
+        if path:
+            register_locale_domain(domain, path)
+
     def apply_all_options(self):
-        """Apply all options to plugins"""
-        removed = False
+        """Apply all options to plugins. Tool config persists only enabled state."""
+        changed = False
         user_config = self.window.core.config.get('plugins')
         for plugin_id, plugin in self.plugins.items():
             if hasattr(plugin, 'initial_options'):
@@ -145,13 +181,44 @@ class Plugins:
                 ucfg = user_config[plugin_id]
                 for key in list(ucfg):
                     if hasattr(plugin, 'options') and key in plugin.options:
-                        plugin.options[key]['value'] = ucfg[key]
+                        option = plugin.options[key]
+                        stored = ucfg[key]
+                        if option.get('type') == 'cmd':
+                            enabled = self._cmd_enabled(option, stored)
+                            self._set_cmd_enabled(option, enabled)
+                            if not isinstance(stored, bool) or stored != enabled:
+                                ucfg[key] = enabled
+                                changed = True
+                        else:
+                            option['value'] = stored
                     else:
-                        print("removed")
-                        removed = True
+                        changed = True
                         del ucfg[key]
-        if removed:
+        if changed:
             self.window.core.config.save()
+
+    @staticmethod
+    def _cmd_enabled(option: Dict[str, Any], stored: Any = None) -> bool:
+        """Resolve tool enabled state from new bool or legacy dict config."""
+        default = False
+        value = option.get('value')
+        if isinstance(value, dict):
+            default = bool(value.get('enabled', False))
+        if isinstance(stored, bool):
+            return stored
+        if isinstance(stored, dict):
+            return bool(stored.get('enabled', default))
+        return default
+
+    @staticmethod
+    def _set_cmd_enabled(option: Dict[str, Any], enabled: bool):
+        """Update enabled flag without replacing plugin-defined tool metadata."""
+        value = option.get('value')
+        if not isinstance(value, dict):
+            value = {"instruction": "", "params": [], "enabled": bool(enabled)}
+            option['value'] = value
+            return
+        value['enabled'] = bool(enabled)
 
     def register_options(self, plugin_id: str, options: Dict[str, dict]):
         """
@@ -160,13 +227,11 @@ class Plugins:
         :param plugin_id: plugin id
         :param options: options dict
         """
-        dict_types = ("dict", "cmd")
         for key, option in options.items():
-            if option.get('type') in dict_types:
-                key_name = f"{key}.params" if option['type'] == "cmd" else key
+            if option.get('type') == "dict":
                 parent = f"plugin.{plugin_id}"
-                option['label'] = key_name
-                self.window.ui.dialogs.register_dictionary(key_name, parent, option)
+                option['label'] = key
+                self.window.ui.dialogs.register_dictionary(key, parent, option)
 
     def unregister(self, plugin_id: str):
         """
@@ -211,7 +276,9 @@ class Plugins:
         plugin = self.plugins.get(plugin_id)
         if plugin:
             if hasattr(plugin, 'destroy'):
-                plugin.destroy()
+                fn = getattr(plugin, "destroy", None)
+                if callable(fn):
+                    plugin.destroy()
 
     def has_options(self, plugin_id: str) -> bool:
         """
@@ -265,7 +332,7 @@ class Plugins:
         if name == trans_key:
             name = default
         if plugin.use_locale:
-            domain = f'plugin.{plugin_id}'
+            domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else f'plugin.{plugin_id}'
             name = trans('plugin.name', domain=domain)
         return name
 
@@ -283,7 +350,7 @@ class Plugins:
         if tooltip == trans_key:
             tooltip = default
         if plugin.use_locale:
-            domain = f'plugin.{plugin_id}'
+            domain = plugin.get_locale_domain() if hasattr(plugin, 'get_locale_domain') else f'plugin.{plugin_id}'
             tooltip = trans('plugin.description', domain=domain)
         return tooltip
 
@@ -356,6 +423,9 @@ class Plugins:
     def load_presets(self):
         """Load presets"""
         self.presets = self.provider.load()
+        from pygpt_net.plugin.filesystem.migration import migrate_tree
+        if migrate_tree(self.presets, reset_runtime=True):
+            self.save_presets()
 
     def remove_plugin_param_from_presets(self, plugin_id: str, param: str = None) -> bool:
         """
@@ -461,19 +531,28 @@ class Plugins:
         if self.presets is None:
             self.load_presets()
 
-        removed = False
+        changed = False
         if self.presets is not None:
             for _preset_id, preset in self.presets.items():
                 preset_config = preset["config"]
                 for config_preset, cfg_values in preset_config.items():
                     if config_preset in self.plugins:
+                        plugin = self.plugins[config_preset]
                         for key in list(cfg_values):
-                            if key not in self.plugins[config_preset].options:
-                                removed = True
+                            if key not in plugin.options:
+                                changed = True
                                 cfg_values.pop(key)
-        if removed:
+                                continue
+                            option = plugin.options[key]
+                            if option.get('type') == 'cmd':
+                                stored = cfg_values[key]
+                                enabled = self._cmd_enabled(option, stored)
+                                if not isinstance(stored, bool) or stored != enabled:
+                                    cfg_values[key] = enabled
+                                    changed = True
+        if changed:
             self.save_presets()
-            print("[FIX] Removed invalid keys from plugin presets.")
+            print("[FIX] Updated plugin preset config.")
 
     def remove_preset_values(self, plugin_id: str, key: str):
         """
@@ -536,11 +615,16 @@ class Plugins:
             self.dump_locale(plugin, path)
 
     def dump_locales(self):
-        """Dump all locales"""
+        """Dump all locales using the per-plugin directory layout."""
         langs = ['en', 'pl']
-        base_path = os.path.join(self.window.core.config.get_app_path(), 'data', 'locale')
+        base_path = os.path.join(
+            self.window.core.config.get_app_path(), 'data', 'locale', 'plugin'
+        )
         for plugin_id, plugin in self.plugins.items():
-            domain = f'plugin.{plugin_id}'
+            locale_dir = plugin.get_locale_dir() if hasattr(plugin, 'get_locale_dir') else None
+            if not locale_dir:
+                locale_dir = os.path.join(base_path, plugin_id)
+            os.makedirs(locale_dir, exist_ok=True)
             for lang in langs:
-                path = os.path.join(base_path, f'{domain}.{lang}.ini')
+                path = os.path.join(locale_dir, f'locale.{lang}.ini')
                 self.dump_locale(plugin, path)

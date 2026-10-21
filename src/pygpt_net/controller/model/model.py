@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.23 15:00:00                  #
+# Updated Date: 2026.09.30 08:14:00                  #
 # ================================================== #
 
 import os
@@ -34,6 +34,15 @@ class Model:
     def _ensure_current_model_map(self):
         return self.window.core.config.data.setdefault('current_model', {})
 
+    def _refresh_reasoning_effort(self):
+        """Refresh the runtime reasoning-effort selector in the chat input."""
+        try:
+            node = self.window.ui.nodes.get('input')
+            if node is not None and hasattr(node, 'update_reasoning_effort'):
+                node.update_reasoning_effort()
+        except (AttributeError, RuntimeError):
+            pass
+
     def handle(self, event: BaseEvent):
         """
         Handle events
@@ -55,10 +64,12 @@ class Model:
                     if model_data is not None and model_data.is_ollama():
                         if (mode == MODE_LLAMA_INDEX or
                                 (
-                                        mode == MODE_CHAT and not model_data.is_openai_supported() and model_data.is_ollama()
+                                        mode == MODE_CHAT
+                                        and not self.window.core.llm.is_openai_compatible(model_data.provider)
+                                        and model_data.is_ollama()
                                 )
                         ):
-                            model_id = model_data.get_ollama_model()
+                            model_id = (model_data.get_ollama_model() or "").strip()
 
                             # load ENV vars first
                             if ('env' in model_data.llama_index
@@ -76,8 +87,9 @@ class Model:
                                 return
                             if not is_model:
                                 event.data["stop"] = True  # stop flow
+                                display_name = model_id or model_data.id or model or ""
                                 self.window.ui.dialogs.alert(
-                                    trans("dialog.ollama.model_not_found").replace("{model}", model_id))
+                                    trans("dialog.ollama.model_not_found").replace("{model}", display_name))
                                 return
 
         # on input before
@@ -105,17 +117,24 @@ class Model:
         mode = cfg.get('mode')
         cfg.set('model', model)
         self._ensure_current_model_map()[mode] = model
+        self._refresh_reasoning_effort()
 
         w.dispatch(Event(Event.MODEL_SELECT, {'value': model}))
-        w.controller.ui.update()
-        w.dispatch(AppEvent(AppEvent.MODEL_SELECTED))
 
+        # Persist the runtime model selection before refreshing the UI. Preset
+        # refresh may re-apply the active preset, so saving afterwards could
+        # temporarily restore its previous model and desynchronize the combo,
+        # config and preset. This also updates virtual ``current.<mode>``
+        # presets, making them remember the last runtime model just like RAG.
         preset = cfg.get('preset')
         if preset and preset != "*":
             preset_data = w.core.presets.get_by_id(mode, preset)
             if preset_data:
                 preset_data.model = model
                 w.core.presets.save(preset)
+
+        w.controller.ui.update()
+        w.dispatch(AppEvent(AppEvent.MODEL_SELECTED))
 
         ctx = w.core.ctx
         ctx.model = model
@@ -127,7 +146,14 @@ class Model:
         w = self.window
         mode = w.core.config.get('mode')
         model = w.core.config.get('model')
-        next_model = w.core.models.get_next(model, mode)
+        keys = list(self._get_visible_by_mode(mode).keys())
+        if not keys:
+            return
+        if model not in keys:
+            next_model = keys[0]
+        else:
+            idx = keys.index(model)
+            next_model = keys[(idx + 1) % len(keys)]
         self.select(next_model)
 
     def prev(self):
@@ -135,7 +161,14 @@ class Model:
         w = self.window
         mode = w.core.config.get('mode')
         model = w.core.config.get('model')
-        prev_model = w.core.models.get_prev(model, mode)
+        keys = list(self._get_visible_by_mode(mode).keys())
+        if not keys:
+            return
+        if model not in keys:
+            prev_model = keys[-1]
+        else:
+            idx = keys.index(model)
+            prev_model = keys[(idx - 1) % len(keys)]
         self.select(prev_model)
 
     def set(self, mode: str, model: str):
@@ -148,6 +181,7 @@ class Model:
         w = self.window
         w.core.config.set('model', model)
         self._ensure_current_model_map()[mode] = model
+        self._refresh_reasoning_effort()
 
     def set_by_idx(self, mode: str, idx: int):
         """
@@ -160,6 +194,7 @@ class Model:
         model = w.core.models.get_by_idx(idx, mode)
         w.core.config.set('model', model)
         self._ensure_current_model_map()[mode] = model
+        self._refresh_reasoning_effort()
         w.dispatch(Event(Event.MODEL_SELECT, {'value': model}))
 
     def select_on_list(self, model: str):
@@ -170,12 +205,20 @@ class Model:
         """
         self.window.ui.nodes["prompt.model"].set_value(model)
 
+    def _get_visible_by_mode(self, mode: str):
+        """Return models visible in user-facing model selection controls."""
+        return {
+            key: item
+            for key, item in self.window.core.models.get_by_mode(mode).items()
+            if not getattr(item, "is_hidden", False)
+        }
+
     def select_current(self):
         """Select current model on list"""
         w = self.window
         mode = w.core.config.get('mode')
         model = w.core.config.get('model')
-        items = w.core.models.get_by_mode(mode)
+        items = self._get_visible_by_mode(mode)
         if model in items:
             self.select_on_list(model)
 
@@ -183,18 +226,29 @@ class Model:
         """Set default model"""
         w = self.window
         model = w.core.config.get('model')
-        if model is None or model == "":
-            mode = w.core.config.get('mode')
+        mode = w.core.config.get('mode')
+        mode_items = self._get_visible_by_mode(mode)
+        if not mode_items:
+            self._refresh_reasoning_effort()
+            return
+
+        resolved = w.core.models.resolve_model_key(mode, model)
+        if resolved in mode_items:
+            model = resolved
+        else:
             current_models = w.core.config.get('current_model') or {}
-            mode_items = w.core.models.get_by_mode(mode)
-            if (
-                mode in current_models
-                and current_models[mode]
-                and current_models[mode] in mode_items
-            ):
-                w.core.config.set('model', current_models[mode])
+            stored = current_models.get(mode) if isinstance(current_models, dict) else None
+            resolved = w.core.models.resolve_model_key(mode, stored)
+            if resolved in mode_items:
+                model = resolved
             else:
-                w.core.config.set('model', w.core.models.get_default(mode))
+                model = next(iter(mode_items))
+
+        if w.core.config.get('model') != model:
+            w.core.config.set('model', model)
+        if self._ensure_current_model_map().get(mode) != model:
+            self._ensure_current_model_map()[mode] = model
+        self._refresh_reasoning_effort()
 
     def switch_inline(
             self,
@@ -222,7 +276,7 @@ class Model:
         """Init models list"""
         w = self.window
         mode = w.core.config.get('mode')
-        data = w.core.models.get_by_mode(mode)
+        data = self._get_visible_by_mode(mode)
 
         items_by_provider = {}
         for k, item in data.items():

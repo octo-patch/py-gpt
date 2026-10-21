@@ -4,103 +4,103 @@ Models
 Built-in models
 ---------------
 
-PyGPT has a preconfigured list of models (as of 2026-02-06):
+PyGPT has a preconfigured list of models (as of 2026-09-24):
 
-- ``bielik-11b-v2.3-instruct:Q4_K_M`` (Ollama)
-- ``chatgpt-4o-latest`` (OpenAI)
-- ``claude-3-5-sonnet-20240620`` (Anthropic)
-- ``claude-3-7-sonnet`` (Anthropic)
-- ``claude-3-opus`` (Anthropic)
-- ``claude-3-opus`` (Anthropic)
-- ``claude-opus-4-0`` (Anthropic)
-- ``claude-sonnet-4-0`` (Anthropic)
+- ``claude-fable-5`` (Anthropic)
+- ``claude-fable-5-1`` (Anthropic)
+- ``claude-haiku-4-5`` (Anthropic)
 - ``claude-opus-4-5`` (Anthropic)
+- ``claude-opus-5`` (Anthropic)
+- ``claude-opus-5-5`` (Anthropic)
 - ``claude-sonnet-4-5`` (Anthropic)
-- ``codellama`` (Ollama)
-- ``codex-mini`` (OpenAI)
-- ``dall-e-2`` (OpenAI)
-- ``dall-e-3`` (OpenAI)
-- ``deep-research-pro-preview-12-2025`` (Google)
-- ``deepseek-chat`` (DeepSeek)
-- ``deepseek-r1:1.5b`` (Ollama)
-- ``deepseek-r1:14b`` (Ollama)
-- ``deepseek-r1:32b`` (Ollama)
-- ``deepseek-r1:7b`` (Ollama)
-- ``deepseek-reasoner`` (DeepSeek)
+- ``claude-sonnet-5`` (Anthropic)
+- ``deepseek-v4-flash`` (DeepSeek)
+- ``deepseek-v4-pro`` (DeepSeek)
 - ``gemini-2.5-computer-use-preview-10-2025`` (Google)
-- ``gemini-1.5-flash`` (Google)
-- ``gemini-1.5-pro`` (Google)
-- ``gemini-2.0-flash-exp`` (Google)
 - ``gemini-2.5-flash`` (Google)
-- ``gemini-2.5-flash-preview-native-audio-dialog`` (Google, real-time)
+- ``gemini-2.5-flash-image`` (Google)
+- ``gemini-2.5-flash-native-audio-latest`` (Google, real-time)
 - ``gemini-2.5-pro`` (Google)
 - ``gemini-3-flash-preview`` (Google)
-- ``gemini-3-pro-image-preview`` (Google)
-- ``gemini-3-pro-preview`` (Google)
-- ``gpt-3.5-turbo`` (OpenAI)
-- ``gpt-3.5-turbo-16k`` (OpenAI)
-- ``gpt-3.5-turbo-instruct`` (OpenAI)
-- ``gpt-4`` (OpenAI)
-- ``gpt-4-32k`` (OpenAI)
-- ``gpt-4-turbo`` (OpenAI)
-- ``gpt-4-vision-preview`` (OpenAI)
-- ``gpt-4.1`` (OpenAI)
-- ``gpt-4.1-mini`` (OpenAI)
-- ``gpt-4.1-nano`` (OpenAI)
-- ``gpt-4o`` (OpenAI)
-- ``gpt-4o-realtime-preview`` (OpenAI, real-time)
-- ``gpt-4o-mini`` (OpenAI)
-- ``gpt-5`` (OpenAI)
-- ``gpt-5-mini`` (OpenAI)
-- ``gpt-5-nano`` (OpenAI)
-- ``gpt-5.2`` (OpenAI)
-- ``gpt-image-1`` (OpenAI)
-- ``gpt-image-1.5`` (OpenAI)
-- ``gpt-oss:20b`` (OpenAI - via Ollama and HuggingFace Router)
-- ``gpt-oss:120b`` (OpenAI - via Ollama and HuggingFace Router)
-- ``gpt-realtime`` (OpenAI, real-time)
-- ``grok-2-vision`` (xAI)
-- ``grok-3`` (xAI)
-- ``grok-3-fast`` (xAI)
-- ``grok-3-mini`` (xAI)
-- ``grok-3-mini-fast`` (xAI)
-- ``grok-4`` (xAI)
-- ``grok-imagine-image`` (xAI)
-- ``grok-imagine-video`` (xAI)
+- ``gemini-3-pro-image`` (Google)
+- ``gemini-3.1-flash-image`` (Google)
+- ``gemini-3.1-flash-lite-image`` (Google)
+- ``gemini-3.1-flash-live-preview`` (Google, real-time)
+- ``gemini-3.1-pro-preview`` (Google)
+- ``gemini-3.5-flash`` (Google)
+- ``gemini-3.5-flash-lite`` (Google)
+- ``gemini-3.6-flash`` (Google)
+- ``gemini-3.7-flash`` (Google)
+- ``gemini-flash-latest`` (Google)
+- ``gemini-pro-latest`` (Google)
+- ``imagen-4.0-generate-001`` (Google)
+- ``nano-banana-pro-preview`` (Google)
+- ``veo-3.1-fast-generate-preview`` (Google)
+- ``veo-3.1-generate-preview`` (Google)
+- ``veo-3.1-lite-generate-preview`` (Google)
+- ``openai/gpt-oss-120b:novita`` (HuggingFace Router)
+- ``openai/gpt-oss-20b:novita`` (HuggingFace Router)
+- ``deepseek-r1:8b`` (Ollama)
+- ``gemma4:e4b`` (Ollama)
+- ``gpt-oss:120b`` (Ollama)
+- ``gpt-oss:20b`` (Ollama)
 - ``llama2-uncensored`` (Ollama)
 - ``llama3.1`` (Ollama)
-- ``llama3.1:70b`` (Ollama)
-- ``mistral`` (Ollama)
-- ``mistral-large`` (Ollama)
-- ``mistral-small3.1`` (Ollama)
-- ``nano-banana-pro-preview`` (Google)
+- ``llama4:scout`` (Ollama)
+- ``mistral-small3.2:latest`` (Ollama)
+- ``nemotron-3.5-lightning:30b`` (Ollama)
+- ``qwen3.5:9b`` (Ollama)
+- ``qwen3.6:27b`` (Ollama)
+- ``SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M`` (Ollama)
+- ``gpt-3.5-turbo`` (OpenAI)
+- ``gpt-3.5-turbo-instruct`` (OpenAI)
+- ``gpt-4`` (OpenAI)
+- ``gpt-4-turbo`` (OpenAI)
+- ``gpt-4o`` (OpenAI)
+- ``gpt-4o-mini`` (OpenAI)
+- ``gpt-5.3-codex`` (OpenAI)
+- ``gpt-5.6-luna`` (OpenAI)
+- ``gpt-5.6-sol`` (OpenAI)
+- ``gpt-5.6-terra`` (OpenAI)
+- ``gpt-6-astra`` (OpenAI)
+- ``gpt-6-luna`` (OpenAI)
+- ``gpt-6-sol`` (OpenAI)
+- ``gpt-6.1-sol`` (OpenAI)
+- ``gpt-image-1.5`` (OpenAI)
+- ``gpt-image-2`` (OpenAI)
+- ``gpt-image-2.5-flare`` (OpenAI)
+- ``gpt-image-2.5-sunburst`` (OpenAI)
+- ``gpt-realtime`` (OpenAI, real-time)
+- ``gpt-realtime-2.1`` (OpenAI, real-time)
+- ``gpt-realtime-2.1-mini`` (OpenAI, real-time)
 - ``o1`` (OpenAI)
-- ``o1-mini`` (OpenAI)
 - ``o1-pro`` (OpenAI)
 - ``o3`` (OpenAI)
-- ``o3-deep-research`` (OpenAI)
 - ``o3-mini`` (OpenAI)
 - ``o3-pro`` (OpenAI)
 - ``o4-mini`` (OpenAI)
-- ``o4-mini-deep-research`` (OpenAI)
-- ``qwen2:7b`` (Ollama)
-- ``qwen2.5-coder:7b`` (Ollama)
-- ``qwen3:8b`` (Ollama)
-- ``qwen3:30b-a3b`` (Ollama)
-- ``r1`` (Perplexity)
+- ``sora-2`` (OpenAI)
+- ``sora-2-pro`` (OpenAI)
 - ``sonar`` (Perplexity)
 - ``sonar-deep-research`` (Perplexity)
 - ``sonar-pro`` (Perplexity)
-- ``sonar-reasoning`` (Perplexity)
 - ``sonar-reasoning-pro`` (Perplexity)
-- ``sora-2`` (OpenAI)
-- ``veo-3.0-generate-preview`` (Google)
-- ``veo-3.0-fast-generate-preview`` (Google)
-- ``veo-3.1-generate-preview`` (Google)
-- ``veo-3.1-fast-generate-preview`` (Google)
+- ``grok-2-vision`` (xAI)
+- ``grok-3-mini`` (xAI)
+- ``grok-3-mini-fast`` (xAI)
+- ``grok-4.3`` (xAI)
+- ``grok-4.5`` (xAI)
+- ``grok-4.6`` (xAI)
+- ``grok-4.7`` (xAI)
+- ``grok-imagine-image`` (xAI)
+- ``grok-imagine-image-quality-latest`` (xAI)
+- ``grok-imagine-video`` (xAI)
+- ``grok-imagine-video-1.5`` (xAI)
 
-All models are specified in the configuration file ``models.json``, which you can customize. 
-This file is located in your working directory. You can add new models provided directly by ``OpenAI API`` (or compatible), ``Google Gen AI API``, ``Anthropic API``, ``xAI API``, and those supported by ``LlamaIndex`` or ``Ollama`` to this file. Configuration for LlamaIndex in placed in ``llama_index`` key.
+All models are specified in the configuration file ``models.json``, which you can customize.
+This file is located in the base profile/application workdir and is not affected by a project data-workdir override. You can add models for built-in providers, OpenAI-compatible/custom providers, ``Ollama``, and LlamaIndex-backed workflows.
+
+For normal LlamaIndex use, no model-specific API key, endpoint, model name, ``**kwargs`` or ``ENV`` block is required. PyGPT resolves the LlamaIndex model from the model ID/provider and reuses the provider's normal global credentials and endpoint. This also applies to runtime custom providers. The optional ``llama_index`` Advanced fields are overrides only: add ``**kwargs`` or ``ENV`` values when you intentionally need provider-specific parameters or want to override the inherited configuration. The model importer therefore does not need to create LlamaIndex ``args``/``env`` entries for ordinary models.
 
 You can import new models by manually editing ``models.json`` or by using the model importer in the ``Config -> Models -> Import`` menu.
 
@@ -108,7 +108,7 @@ You can import new models by manually editing ``models.json`` or by using the mo
     The models on the list are sorted by provider, not by manufacturer. A model from a particular manufacturer may be available through different providers (e.g., OpenAI models can be provided by the ``OpenAI API`` or by ``OpenRouter``). If you want to use a specific model through a particular provider, you need to configure the provider in ``Config -> Models -> Edit``, or import it directly via ``Config -> Models -> Import``.
 
 .. tip::
-    Anthropic and Deepseek API providers use VoyageAI for embeddings (Chat with Files and attachments RAG), so you must also configure the Voyage API key if you want to use embeddings from these providers.
+    Anthropic and Deepseek API providers use VoyageAI for embeddings (persistent and attachment RAG), so you must also configure the Voyage API key if you want to use embeddings from these providers.
 
 Adding a custom model
 ---------------------
@@ -120,9 +120,12 @@ There is built-in support for those LLM providers:
 * ``Anthropic``
 * ``Azure OpenAI`` (native SDK)
 * ``Deepseek API``
+* ``Eden AI``
+* ``Forge``
 * ``Google`` (native SDK)
 * ``HuggingFace API``
 * ``HuggingFace Router`` (wrapper for OpenAI compatible ChatCompletions)
+* ``LiteLLM``
 * ``Local models`` (OpenAI API compatible)
 * ``Mistral AI``
 * ``Ollama``
@@ -131,17 +134,55 @@ There is built-in support for those LLM providers:
 * ``Perplexity``
 * ``xAI`` (native SDK)
 
-How to use local or non-GPT models
-----------------------------------
+Custom providers (OpenAI-compatible)
+------------------------------------
 
-Llama 3, Mistral, DeepSeek, Qwen, gpt-oss, and other local models
-``````````````````````````````````````````````````````````````````
+Add OpenAI Chat Completions-compatible providers in:
 
-How to use locally installed Llama 3, DeepSeek, Mistral, etc. models:
+.. code-block:: ini
 
-1) Choose a working mode: ``Chat`` or ``Chat with Files``.
+   Config -> Settings -> Custom providers
 
-2) On the models list - select, edit, or add a new model (with ``ollama`` provider). You can edit the model settings through the menu ``Config -> Models -> Edit``, then configure the model parameters in the ``advanced`` section.
+Configure one row per provider with:
+
+* ``Provider name``
+* ``API base URL``
+* ``API key`` (optional when the endpoint does not require authentication)
+
+After saving, the provider is available in the Models Editor and ``Config -> Models -> Import``. Normal Chat uses the OpenAI-compatible Chat Completions API; LlamaIndex-backed flows reuse the same provider endpoint and credentials automatically.
+
+Per-model ``API base`` and ``API key`` values can override the provider defaults.
+
+Per-model API base and API key
+------------------------------
+
+The Models Editor provides two optional fields in ``Advanced`` settings, directly after ``Tool calls``:
+
+* ``API base`` - model-specific API base URL.
+* ``API key`` - model-specific API key.
+
+When these fields are non-empty, normal OpenAI-compatible Chat requests use them instead of the
+provider/global API endpoint or key for that model. For the ``Local models (OpenAI API compatible)``
+provider, the same values are also passed to the LlamaIndex ``OpenAILike`` wrapper
+(``API base`` -> ``api_base``, ``API key`` -> ``api_key``).
+
+Leave either field empty to keep the normal provider/global value for that field. This is especially
+useful when multiple local/OpenAI-compatible servers are configured at the same time, because each model
+can point to its own server without changing the global OpenAI configuration.
+
+LlamaIndex ``**kwargs`` and ``ENV`` fields are optional overrides. Leave them empty for the normal path: PyGPT uses the model ID as the LlamaIndex model name and resolves credentials/endpoints from the selected provider's global settings. This works for built-in and runtime custom providers. Populate these fields only for provider-specific parameters or an intentional override.
+
+How to use local or other models
+--------------------------------
+
+DeepSeek, Qwen, gpt-oss, Gemma, Mistral, Llama, and other local models
+``````````````````````````````````````````````````````````````````````````````````````
+
+How to use locally installed DeepSeek, Qwen, gpt-oss, Gemma, Mistral, Llama, and other models:
+
+1) Choose the ``Chat`` working mode.
+
+2) On the models list, select, edit, import, or add a model with the ``ollama`` provider. The model ID should match the name served by Ollama. No LlamaIndex ``model_name`` entry in Advanced ``**kwargs`` is required; PyGPT uses the model ID automatically.
 
 3) Download and install Ollama from here: https://github.com/ollama/ollama
 
@@ -151,21 +192,23 @@ For example, on Linux:
 
     $ curl -fsSL https://ollama.com/install.sh | sh
 
-4) Run the model (e.g. Llama 3) locally on your machine. For example, on Linux:
+4) Run the model locally on your machine. For example, on Linux:
 
 .. code-block:: sh
 
-    $ ollama run llama3.1
+    $ ollama run gemma4:e4b
 
 5) Return to PyGPT and select the correct model from models list to chat with selected model using Ollama running locally.
 
 **Example available models:**
 
-- ``llama3.1``
-- ``codellama``
-- ``mistral``
-- ``llama2-uncensored``
-- ``deepseek-r1``
+- ``gemma4:e4b``
+- ``qwen3.5:9b``
+- ``qwen3.6:27b``
+- ``llama4:scout``
+- ``mistral-small3.2``
+- ``deepseek-r1:8b``
+- ``SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M``
 
 etc.
 
@@ -181,12 +224,7 @@ The default endpoint for Ollama is: http://localhost:11434
 
 You can change it globally by setting the environment variable ``OLLAMA_API_BASE`` in ``Settings -> General -> Advanced -> Application environment``.
 
-You can also change the "base_url" for a specific model in its configuration:
-
-``Config -> Models -> Edit``, then in the ``Advanced -> [LlamaIndex] ENV Vars`` section add the variable:
-
-NAME: ``OLLAMA_API_BASE``
-VALUE: ``http://my_endpoint.com:11434``
+The global value is automatically reused by Ollama LlamaIndex LLM and embedding wrappers. If one model must use a different endpoint, you can override it for that model in ``Config -> Models -> Edit -> Advanced -> [LlamaIndex] ENV Vars`` with ``OLLAMA_API_BASE``.
 
 **List of all models supported by Ollama:**
 
@@ -194,90 +232,22 @@ https://ollama.com/library
 
 https://github.com/ollama/ollama
 
-**IMPORTANT:** Remember to define the correct model name in the **kwargs list in the model settings.
-
 Using local embeddings
 ```````````````````````
 Refer to: https://docs.llamaindex.ai/en/stable/examples/embeddings/ollama_embedding/
 
-You can use an Ollama instance for embeddings. Simply select the ``ollama`` provider in:
+You can use an Ollama instance for embeddings. In ``Config -> Settings -> Indexes / RAG -> Embeddings`` select ``ollama`` as the global ``Embeddings provider`` and set the Ollama embedding model in ``Default embedding models`` for the ``ollama`` provider.
 
-.. code-block:: sh
-
-    Config -> Settings -> Indexes / LlamaIndex -> Embeddings -> Embeddings provider
-
-Define parameters like model name and Ollama base URL in the Embeddings provider **kwargs list, e.g.:
-
-- name: ``model_name``, value: ``llama3.1``, type: ``str``
-
-- name: ``base_url``, value: ``http://localhost:11434``, type: ``str``
+The Ollama endpoint is inherited from the global ``OLLAMA_API_BASE`` configuration, so it does not need to be repeated in embedding ``**kwargs``. The ``Global embeddings provider **kwargs`` and ``Global embeddings provider ENV vars`` fields are available in the Embeddings **Advanced** group only for optional overrides. The common ``Embeddings timeout`` setting applies to embedding requests and defaults to 60 seconds.
 
 
-Google Gemini, Anthropic Claude, xAI Grok, etc.
-```````````````````````````````````````````````
-If you want to use non-OpenAI models in ``Chat with Files`` and ``Agents (LlamaIndex)`` modes, then remember to configure the required parameters like API keys in the model config fields. ``Chat`` mode works via OpenAI SDK (compatible API), ``Chat with Files`` and ``Agents (LlamaIndex)`` modes works via LlamaIndex.
+Other providers and LlamaIndex-based modes
+``````````````````````````````````````````
 
-**Google Gemini**
+PyGPT can route the same model differently depending on the selected work mode and provider integration. In normal ``Chat``, built-in providers can use their native SDKs when enabled, while local or third-party services can use OpenAI-compatible endpoints. RAG-backed Chat and other workflows that rely on LlamaIndex use the model's configured LlamaIndex provider/wrapper; provider-specific agent runtimes can use their own integration path.
 
-Required ENV:
+Configure provider credentials/endpoints once in ``Config -> Settings -> API Keys`` or, for runtime OpenAI-compatible providers, in ``Config -> Settings -> Custom providers``. LlamaIndex-backed modes reuse those global settings automatically and use the selected model ID as the model name. Model-level LlamaIndex ``**kwargs`` and ``ENV`` can remain empty.
 
-- GOOGLE_API_KEY = {api_key_google}
+Use the model's ``Advanced`` LlamaIndex fields only when you need an explicit provider-specific override or extra constructor parameter. For ``Local models (OpenAI API compatible)``, prefer the per-model ``API base`` and ``API key`` fields when only one model needs a different connection.
 
-Required **kwargs:
-
-- model
-
-**Anthropic Claude**
-
-Required ENV:
-
-- ANTHROPIC_API_KEY = {api_key_anthropic}
-
-Required **kwargs:
-
-- model
-
-**xAI Grok** (Chat mode only)
-
-Required ENV:
-
-- OPENAI_API_KEY = {api_key_xai}
-- OPENAI_API_BASE = {api_endpoint_xai}
-
-Required **kwargs:
-
-- model
-
-**Mistral AI**
-
-Required ENV:
-
-- MISTRAL_API_KEY = {api_key_mistral}
-
-Required **kwargs:
-
-- model
-
-**Perplexity**
-
-Required ENV:
-
-- PPLX_API_KEY = {api_key_perplexity}
-
-Required **kwargs:
-
-- model
-
-**HuggingFace API** (Chat with Files mode only)
-
-Required ENV:
-
-- HUGGING_FACE_TOKEN = {api_key_hugging_face}
-
-Required **kwargs:
-
-- model_name | model
-- token
-- provider = auto
-
-
+Embeddings follow the same rule. Configure the global embedding provider and provider-to-model mappings in ``Config -> Settings -> Indexes / RAG -> Embeddings``. API keys and endpoints are inherited from the selected provider's global configuration; ``Global embeddings provider **kwargs`` and ``Global embeddings provider ENV vars`` are optional Advanced overrides. DeepSeek and Anthropic use the configured VoyageAI key for their default Voyage embedding integration.

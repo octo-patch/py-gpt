@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.08.29 18:00:00                  #
+# Updated Date: 2026.08.13 16:00:00                  #
 # ================================================== #
 
 import os
@@ -14,6 +14,8 @@ import wave
 import base64
 
 from .base import BaseProvider
+
+from pygpt_net.provider.core.model.compat import version_at_least
 
 
 class GoogleGenAITextToSpeech(BaseProvider):
@@ -29,7 +31,7 @@ class GoogleGenAITextToSpeech(BaseProvider):
         self.id = "google_genai_tts"
         self.name = "Google GenAI TTS"
 
-        # Supported preview TTS models (fallback to flash if invalid)
+        # Known preview TTS models; later numbered Gemini TTS models are accepted too.
         self.allowed_models = [
             "gemini-2.5-flash-preview-tts",
             "gemini-2.5-pro-preview-tts",
@@ -80,13 +82,15 @@ class GoogleGenAITextToSpeech(BaseProvider):
         client = self.plugin.window.core.api.google.get_client()
 
         # Resolve path where audio should be written
-        output_file = self.plugin.output_file
-        path = os.path.join(self.plugin.window.core.config.path, output_file)
+        path = self.prepare_output_path()
 
         # Validate/select model
         model = self.plugin.get_option_value("google_genai_tts_model") or "gemini-2.5-flash-preview-tts"
         model = self._normalize_model_name(model)
-        if model not in self.allowed_models:
+        if model not in self.allowed_models and not (
+                "tts" in model.lower()
+                and version_at_least(model, "gemini-", (2, 5))
+        ):
             model = "gemini-2.5-flash-preview-tts"
 
         # Validate/select voice
@@ -217,7 +221,7 @@ class GoogleGenAITextToSpeech(BaseProvider):
 
         :return: True if configured, False otherwise
         """
-        api_key = self.plugin.window.core.config.get("api_key_google")
+        api_key = self.plugin.window.core.llm.get_config("google", "api_key")
         return api_key is not None and api_key != ""
 
     def get_config_message(self) -> str:

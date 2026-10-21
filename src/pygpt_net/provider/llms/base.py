@@ -6,32 +6,87 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.15 01:00:00                  #
+# Updated Date: 2026.10.02 12:00:00                  #
 # ================================================== #
 
 import os
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, TYPE_CHECKING, Any
 
-import httpx
-from llama_index.core.base.embeddings.base import BaseEmbedding
-from llama_index.core.llms.llm import BaseLLM as LlamaBaseLLM
-from llama_index.core.multi_modal_llms import MultiModalLLM as LlamaMultiModalLLM
+if TYPE_CHECKING:
+    from llama_index.core.base.embeddings.base import BaseEmbedding
+    from llama_index.core.llms.llm import BaseLLM as LlamaBaseLLM
 
+from pygpt_net.core.locale import LocaleDomain
 from pygpt_net.core.types import (
     MODE_LANGCHAIN,
-    MODE_LLAMA_INDEX, 
+    MODE_LLAMA_INDEX,
     MODE_CHAT,
 )
 from pygpt_net.item.model import ModelItem
 from pygpt_net.utils import parse_args
 
 
-class BaseLLM:
+from .agents import ProviderAgents
+
+
+class BaseLLM(LocaleDomain):
+    agents_class = ProviderAgents
+    _MISSING = object()
+
+    # ========================================
+    # Provider identity and initialization
+    # ========================================
+
     def __init__(self, *args, **kwargs):
+        self.init_locale_domain()
         self.id = ""
         self.name = ""
-        self.type = []  # langchain, llama_index, embeddings
+        self.type = []  # llama_index, embeddings
         self.description = ""
+        self.window = None
+        self.config_id = ""
+        self.agents = self.agents_class(self)
+
+    def bind(self, window):
+        """Bind provider to the application window/config at registration time."""
+        self.window = window
+        if not getattr(self, "config_id", ""):
+            self.config_id = self.id
+        return self
+
+    def get_name(self) -> str:
+        """Return localized provider name when the current domain defines it."""
+        domain = self.get_locale_domain()
+        if domain:
+            value = self.trans("provider.name")
+            if value != "provider.name":
+                return value
+        return self.name
+
+    def setup(self) -> dict:
+        """Return provider-owned setup metadata.
+
+        Providers expose their capabilities and API configuration here instead
+        of relying on central, hard-coded provider lists. ``openai_compatible``
+        declares whether the provider can use the OpenAI-compatible direct API
+        transport. The ``settings`` dict may contain ``api_key``, ``api_base``
+        and an ``extra`` mapping. The sibling ``remote_tools`` mapping declares
+        tool switches and all their parameters, stored in
+        ``providers[config_id][remote_tools]``.
+        """
+        return {
+            "openai_compatible": False,
+            "settings": {},
+            "remote_tools": {},
+        }
+
+    def is_openai_compatible(self) -> bool:
+        """Return whether this provider exposes an OpenAI-compatible API."""
+        try:
+            setup = self.setup() or {}
+        except Exception:
+            return False
+        return bool(setup.get("openai_compatible", False)) if isinstance(setup, dict) else False
 
     def init(
             self,
@@ -63,6 +118,65 @@ class BaseLLM:
                 except Exception as e:
                     pass
 
+    # ========================================
+    # LlamaIndex models
+    # ========================================
+
+    def llama(
+            self,
+            window,
+            model: ModelItem,
+            stream: bool = False
+    ) -> "LlamaBaseLLM":
+        """
+        Return LLM provider instance for llama index query and chat
+
+        :param window: window instance
+        :param model: model instance
+        :param stream: stream mode
+        :return: provider instance
+        """
+        pass
+
+    def llama_completion(
+            self,
+            window,
+            model: ModelItem,
+            stream: bool = False
+    ) -> "LlamaBaseLLM":
+        """
+        Return LlamaIndex LLM instance for plain-text completion.
+
+        Providers may override this when their regular LlamaIndex wrapper maps
+        ``complete()`` back to a chat endpoint. The default implementation uses
+        the same provider object as Chat with Files and the caller invokes its
+        ``complete`` / ``stream_complete`` methods directly.
+
+        :param window: window instance
+        :param model: model instance
+        :param stream: stream mode
+        :return: LlamaIndex LLM provider instance
+        """
+        return self.llama(window=window, model=model, stream=stream)
+
+    # ========================================
+    # Embeddings
+    # ========================================
+
+    def llama_embeddings(
+            self,
+            window,
+            config: Optional[List[Dict]] = None
+    ) -> "BaseEmbedding":
+        """
+        Return provider instance for embeddings
+
+        :param window: window instance
+        :param config: config keyword arguments list
+        :return: provider instance
+        """
+        pass
+
     def init_embeddings(
             self,
             window,
@@ -82,6 +196,231 @@ class BaseLLM:
                     os.environ[item['name']] = str(item['value'].format(**window.core.config.all()))
                 except Exception as e:
                     pass
+
+    def get_embeddings_timeout(self, cfg) -> float:
+        """Return the global embeddings request timeout in seconds."""
+        value = cfg.get("llama.idx.embeddings.timeout")
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            timeout = 60.0
+        return timeout if timeout > 0 else 60.0
+
+    # ========================================
+    # Agents and Computer Use
+    # ========================================
+
+    def llama_agent(
+            self,
+            window,
+            model: ModelItem,
+            stream: bool = False,
+            allow_remote_tools: bool = True,
+            force_computer_use: bool = False,
+    ) -> "LlamaBaseLLM":
+        """
+        Return LlamaIndex LLM instance for Agents v2.
+
+        Providers select their agent component through ``agents_class``. It owns
+        native tools and continuation adapters; the default component reuses
+        the regular LlamaIndex model.
+
+        :param window: window instance
+        :param model: model instance
+        :param stream: stream mode
+        :param allow_remote_tools: allow provider-native remote tools
+        :param force_computer_use: force provider-native Computer Use remote tool
+        :return: provider instance
+        """
+        return self.agents.create(
+            window, model, stream, allow_remote_tools, force_computer_use,
+        )
+
+    def llama_with_computer_runtime(
+            self,
+            window,
+            model: ModelItem,
+            stream: bool = False,
+            computer_runtime=None,
+            force_computer_use: bool = False,
+    ) -> "LlamaBaseLLM":
+        """Return a LlamaIndex LLM bound to the shared Computer Use runtime.
+
+        The agent component selects and binds the continuation adapter shared
+        by Chat with Files and legacy agents.
+        """
+        return self.agents.bind_computer_use(
+            window=window,
+            model=model,
+            stream=stream,
+            computer_runtime=computer_runtime,
+            force_computer_use=force_computer_use,
+        )
+
+    def get_openai_agent_provider(
+            self,
+            window,
+            model: ModelItem,
+            stream: bool = False
+    ):
+        """
+        Return agent provider instance for OpenAI agents
+
+        :param window: window instance
+        :param model: model instance
+        :param stream: stream mode
+        :return: agent provider instance
+        """
+        pass
+
+    # ========================================
+    # Provider settings
+    # ========================================
+
+    def get_config_id(self) -> str:
+        """Return the logical ID used under ``config.providers``."""
+        return getattr(self, "config_id", "") or self.id
+
+    def get_settings_schema(self) -> dict:
+        """Return normalized provider settings schema."""
+        try:
+            setup = self.setup() or {}
+        except Exception:
+            return {}
+        settings = setup.get("settings", {}) if isinstance(setup, dict) else {}
+        return settings if isinstance(settings, dict) else {}
+
+    def has_config(self, key: str) -> bool:
+        """Return True when the provider declares a configuration key."""
+        return self._get_schema_field(key) is not None
+
+    def requires_api_key(self) -> bool:
+        """Whether the UI should require a configured provider API key."""
+        setup = self.setup() or {}
+        return bool(setup.get("require_api_key", self.has_config("api_key")))
+
+    def get_config(self, key: str, default: Any = _MISSING) -> Any:
+        """Read a provider value from ``config.providers``.
+
+        ``api_key`` and ``api_base`` live directly under the provider entry;
+        all other declared fields are read from ``extra``.  If the entry has
+        not been materialized yet, the provider schema default is returned.
+        """
+        fallback = default
+        field = self._get_schema_field(key)
+        if fallback is self._MISSING:
+            fallback = field.get("default") if field is not None else None
+        if self.window is None or not hasattr(self.window, "core"):
+            return fallback
+        config = getattr(self.window.core, "config", None)
+        if config is None:
+            return fallback
+        value = config.get_provider(self.get_config_id(), key, fallback)
+        # Optional ENV fallback is provider-owned metadata. This keeps special
+        # cases (e.g. Forge) out of the central client/config code while still
+        # allowing a provider to retain its historical environment fallback.
+        if (value is None or value == "") and field is not None:
+            env_names = field.get("env", [])
+            if isinstance(env_names, str):
+                env_names = [env_names]
+            for env_name in env_names if isinstance(env_names, (list, tuple)) else []:
+                env_value = os.environ.get(str(env_name), "")
+                if env_value:
+                    return env_value
+        return value
+
+    def set_config(self, key: str, value: Any):
+        """Write a provider value to ``config.providers``."""
+        if self.window is None or not hasattr(self.window, "core"):
+            return
+        config = getattr(self.window.core, "config", None)
+        if config is not None:
+            config.set_provider(self.get_config_id(), key, value)
+
+    def sync_config(self) -> bool:
+        """Materialize missing provider defaults in the active config."""
+        if self.window is None or not hasattr(self.window, "core"):
+            return False
+        schema = self.get_settings_schema()
+        remote_schema = self.get_remote_tools_schema()
+        if not schema and not remote_schema:
+            return False
+        config = getattr(self.window.core, "config", None)
+        if config is None:
+            return False
+        defaults = {}
+        for key in ("api_key", "api_base"):
+            field = schema.get(key)
+            if isinstance(field, dict):
+                defaults[key] = field.get("default")
+        extra_defaults = {}
+        for key, field in (schema.get("extra", {}) or {}).items():
+            if isinstance(field, dict):
+                extra_defaults[key] = field.get("default")
+        if extra_defaults:
+            defaults["extra"] = extra_defaults
+        if remote_schema:
+            defaults["remote_tools"] = {
+                key: field.get("default") for key, field in remote_schema.items()
+                if isinstance(field, dict)
+            }
+        return config.ensure_provider(self.get_config_id(), defaults)
+
+    # ========================================
+    # Remote tools
+    # ========================================
+
+    def get_remote_tools_schema(self) -> dict:
+        """Provider-owned fields, including tool switches and tool parameters.
+
+        Keys are local to the provider (e.g. ``mcp`` and ``mcp.args``).
+        Fields use the Settings schema; ``tool`` marks selectable tools,
+        ``hidden`` suppresses a field in Settings, and ``legacy_key`` is used
+        only by config migration. Providers may override the accessors below.
+        """
+        schema = (self.setup() or {}).get("remote_tools", {})
+        return schema if isinstance(schema, dict) else {}
+
+    def get_remote_tools(self) -> dict:
+        """Return selectable tool IDs and their definitions."""
+        return {key: field for key, field in self.get_remote_tools_schema().items()
+                if isinstance(field, dict) and field.get("tool")}
+
+    def get_remote_tool_config(self, key: str, default: Any = _MISSING) -> Any:
+        """Read a tool switch/parameter, falling back to its declared default."""
+        value = self.get_config("remote_tools." + key, default)
+        field = self.get_remote_tools_schema().get(key, {})
+        if field.get("value_type") == "optional_bool":
+            if value in (None, ""):
+                return None
+            if isinstance(value, str):
+                return value.lower() == "true"
+        return value
+
+    def set_remote_tool_config(self, key: str, value: Any):
+        """Write a tool switch/parameter without saving the config file."""
+        self.set_config("remote_tools." + key, value)
+
+    def is_remote_tool_enabled(self, tool_id: str) -> bool:
+        return tool_id in self.get_remote_tools() and bool(self.get_remote_tool_config(tool_id))
+
+    def set_remote_tool_enabled(self, tool_id: str, enabled: bool):
+        if tool_id in self.get_remote_tools():
+            self.set_remote_tool_config(tool_id, bool(enabled))
+
+    def supports_remote_tool(self, model: ModelItem, tool_id: str) -> bool:
+        """Forward-compatible capability policy, overridable by each provider."""
+        field = self.get_remote_tools().get(tool_id)
+        model_id = str(getattr(model, "id", "") or "").strip().lower()
+        if field is None or not model_id:
+            return False
+        return (model_id not in field.get("unsupported_models", ())
+                and not any(model_id.startswith(prefix)
+                            for prefix in field.get("unsupported_prefixes", ())))
+
+    # ========================================
+    # Request parameters and environment
+    # ========================================
 
     def parse_args(
             self,
@@ -108,111 +447,115 @@ class BaseLLM:
                                 pass
         return args
 
-    def completion(
+    def get_env_override(
+            self,
+            window,
+            env: Optional[List[Dict]],
+            names: List[str],
+    ) -> Optional[str]:
+        """Return a declared Advanced ENV override without using stale process ENV."""
+        wanted = set(names)
+        for item in env or []:
+            if not isinstance(item, dict) or item.get("name") not in wanted:
+                continue
+            value = item.get("value")
+            if value is None:
+                return None
+            if isinstance(value, str):
+                try:
+                    value = value.format(**window.core.config.all())
+                except Exception:
+                    pass
+            value = str(value)
+            return value if value else None
+        return None
+
+    def get_openai_compatible_env_names(self) -> tuple[List[str], List[str]]:
+        """Return common API key/base ENV names accepted by a provider."""
+        key_names = ["OPENAI_API_KEY"]
+        base_names = ["OPENAI_API_BASE"]
+        provider_names = {
+            "deepseek_api": (["DEEPSEEK_API_KEY"], ["DEEPSEEK_API_BASE"]),
+            "x_ai": (["XAI_API_KEY"], ["XAI_API_BASE"]),
+            "perplexity": (["PERPLEXITY_API_KEY", "PPLX_API_KEY"], ["PERPLEXITY_API_BASE"]),
+            "open_router": (["OPENROUTER_API_KEY"], ["OPENROUTER_API_BASE"]),
+            "huggingface_router": (["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"], ["HF_INFERENCE_ENDPOINT"]),
+            "forge": (["FORGE_API_KEY"], ["FORGE_API_BASE"]),
+            "edenai": (["EDENAI_API_KEY"], ["EDENAI_API_BASE"]),
+        }
+        extra_keys, extra_bases = provider_names.get(self.id, ([], []))
+        return [*extra_keys, *key_names], [*extra_bases, *base_names]
+
+    def prepare_openai_compatible_args(
             self,
             window,
             model: ModelItem,
-            stream: bool = False
-    ) -> any:
-        """
-        Return LLM provider instance for completion in langchain mode
+            options: Optional[dict] = None,
+    ) -> dict:
+        """Resolve LlamaIndex args with normal PyGPT provider defaults.
 
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: provider instance
+        ``model.llama_index.args`` remains an override layer. Missing/empty
+        model, API key and API base are inherited from the same global/provider
+        configuration used by normal Chat, including runtime custom providers
+        and per-model custom endpoint/key overrides.
         """
-        pass
+        if options is None:
+            options = model.llama_index
+        args = self.parse_args(options or {}, window)
 
-    def chat(
+        if not args.get("model"):
+            args["model"] = model.id
+
+        client_args = window.core.models.prepare_client_args(MODE_CHAT, model)
+        key_env_names, base_env_names = self.get_openai_compatible_env_names()
+        env = (model.llama_index or {}).get("env", [])
+        if not args.get("api_key"):
+            api_key = self.get_env_override(window, env, key_env_names)
+            if not api_key:
+                api_key = client_args.get("api_key")
+            if api_key:
+                args["api_key"] = api_key
+        if not args.get("api_base"):
+            api_base = self.get_env_override(window, env, base_env_names)
+            if not api_base:
+                api_base = client_args.get("base_url")
+            if api_base:
+                args["api_base"] = api_base
+        return args
+
+    def prepare_openai_compatible_embedding_args(
             self,
             window,
-            model: ModelItem,
-            stream: bool = False
-    ) -> any:
-        """
-        Return LLM provider instance for chat in langchain mode
+            config: Optional[List[Dict]] = None,
+    ) -> dict:
+        """Resolve embedding overrides against provider-global API settings."""
+        args = self.parse_args({"args": config or []}, window)
 
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: provider instance
-        """
-        pass
+        model = ModelItem()
+        model.provider = self.id
+        client_args = window.core.models.prepare_client_args(MODE_CHAT, model)
+        key_env_names, base_env_names = self.get_openai_compatible_env_names()
+        env = window.core.config.get("llama.idx.embeddings.env", []) or []
 
-    def llama(
-            self,
-            window,
-            model: ModelItem,
-            stream: bool = False
-    ) -> LlamaBaseLLM:
-        """
-        Return LLM provider instance for llama index query and chat
+        if not args.get("api_key"):
+            api_key = self.get_env_override(window, env, key_env_names)
+            if not api_key:
+                api_key = client_args.get("api_key")
+            if api_key:
+                args["api_key"] = api_key
+        if not args.get("api_base"):
+            api_base = self.get_env_override(window, env, base_env_names)
+            if not api_base:
+                api_base = client_args.get("base_url")
+            if api_base:
+                args["api_base"] = api_base
+        if args.get("model") and not args.get("model_name"):
+            args["model_name"] = args.pop("model")
+        return args
 
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: provider instance
-        """
-        pass
-
-    def llama_multimodal(
-            self,
-            window,
-            model: ModelItem,
-            stream: bool = False
-    ) -> LlamaMultiModalLLM:
-        """
-        Return multimodal LLM provider instance for llama
-
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: LLM provider instance
-        """
-        pass
-
-    def get_embeddings_model(
-            self,
-            window,
-            config: Optional[List[Dict]] = None
-    ) -> BaseEmbedding:
-        """
-        Return provider instance for embeddings
-
-        :param window: window instance
-        :param config: config keyword arguments list
-        :return: provider instance
-        """
-        pass
-
-    def get_openai_agent_provider(
-            self,
-            window,
-            model: ModelItem,
-            stream: bool = False
-    ):
-        """
-        Return agent provider instance for OpenAI agents
-
-        :param window: window instance
-        :param model: model instance
-        :param stream: stream mode
-        :return: agent provider instance
-        """
-        pass
-
-    def get_models(
-            self,
-            window,
-    ) -> List[Dict]:
-        """
-        Return list of models for the provider
-
-        :param window: window instance
-        :return: list of models
-        """
-        return []
+    # ========================================
+    # Clients and model discovery
+    # ========================================
 
     def get_client(self, window):
         """
@@ -228,6 +571,33 @@ class BaseLLM:
             model=model,
         )
 
+    def get_models(
+            self,
+            window,
+    ) -> List[Dict]:
+        """
+        Return list of models for the provider.
+
+        The default implementation queries the OpenAI-compatible ``/models``
+        endpoint and is safe to call when the endpoint is unreachable: it logs
+        the failure and returns an empty list instead of raising. Providers
+        with a non-OpenAI schema must override this method.
+
+        :param window: window instance
+        :return: list of models
+        """
+        items: List[Dict] = []
+        try:
+            client = self.get_client(window)
+            models_list = client.models.list()
+            if models_list.data:
+                items.extend(
+                    {"id": item.id, "name": item.id} for item in models_list.data
+                )
+        except Exception as e:
+            window.core.debug.log(e)
+        return items
+
     def inject_llamaindex_http_clients(self, args: dict, cfg) -> dict:
         import httpx
         proxy = (cfg.get("api_proxy") or "").strip()  # e.g. "http://user:pass@host:3128"
@@ -240,3 +610,81 @@ class BaseLLM:
         args["http_client"] = httpx.Client(**common_kwargs)
         args["async_http_client"] = httpx.AsyncClient(**common_kwargs)
         return args
+
+    def inject_llamaindex_embedding_http_clients(self, args: dict, cfg) -> dict:
+        """Inject HTTP clients using the global embeddings request timeout."""
+        import httpx
+        proxy = (cfg.get("api_proxy") or "").strip()
+        if not cfg.get("api_proxy.enabled", False):
+            proxy = ""
+        common_kwargs = dict(
+            timeout=self.get_embeddings_timeout(cfg),
+            follow_redirects=True,
+        )
+        if proxy:
+            common_kwargs["proxy"] = proxy  # httpx>=0.28
+
+        if "http_client" not in args:
+            args["http_client"] = httpx.Client(**common_kwargs)
+        if "async_http_client" not in args:
+            args["async_http_client"] = httpx.AsyncClient(**common_kwargs)
+        return args
+
+    # ========================================
+    # Logging
+    # ========================================
+
+    def log_llama_create(
+            self,
+            window,
+            model: Optional[ModelItem],
+            args: Optional[dict],
+            constructor: str,
+            extra: Optional[dict] = None,
+            kind: str = "llm",
+    ):
+        """Log final LlamaIndex constructor arguments when API input logging is enabled."""
+        kwargs = dict(args or {})
+        if extra:
+            kwargs.update(extra)
+        model_id = getattr(model, "id", None)
+        if model_id is None and kind == "embeddings":
+            model_id = kwargs.get("model_name") or kwargs.get("model")
+        window.core.api.logger.log_input(
+            type=f"llama_index.{kind}.create",
+            provider=str(getattr(model, "provider", None) or self.id or ""),
+            kwargs=kwargs,
+            model=model_id,
+            path=constructor,
+        )
+
+    # ========================================
+    # Compatibility
+    # ========================================
+
+    def get_embeddings_model(
+            self,
+            window,
+            config: Optional[List[Dict]] = None,
+    ) -> "BaseEmbedding":
+        """Compatibility entry point; implementations belong in llama_embeddings()."""
+        return self.llama_embeddings(window=window, config=config)
+
+    # ========================================
+    # Private settings helpers
+    # ========================================
+
+    def _get_schema_field(self, key: str) -> Optional[dict]:
+        if key.startswith("remote_tools."):
+            field = self.get_remote_tools_schema().get(key[len("remote_tools."):])
+            return field if isinstance(field, dict) else None
+        schema = self.get_settings_schema()
+        if key in ("api_key", "api_base"):
+            field = schema.get(key)
+            return field if isinstance(field, dict) else None
+        extra_key = key[6:] if key.startswith("extra.") else key
+        extra = schema.get("extra", {})
+        if isinstance(extra, dict):
+            field = extra.get(extra_key)
+            return field if isinstance(field, dict) else None
+        return None

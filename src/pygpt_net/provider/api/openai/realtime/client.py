@@ -6,7 +6,7 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.01 00:00:00                  #
+# Updated Date: 2026.09.10 15:55:00                  #
 # ================================================== #
 
 import asyncio
@@ -18,6 +18,7 @@ import websockets
 from typing import Optional, Callable, Awaitable
 from urllib.parse import urlencode
 
+from pygpt_net.core.qt import safe_emit
 from pygpt_net.core.events import RealtimeEvent
 from pygpt_net.core.types import MODE_AUDIO
 from pygpt_net.item.ctx import CtxItem
@@ -39,8 +40,9 @@ from pygpt_net.core.realtime.shared.tools import (
     tools_signature,
     build_tool_outputs_payload,
 )
-from pygpt_net.core.realtime.shared.turn import TurnMode, apply_turn_mode_openai
+from pygpt_net.core.realtime.shared.turn import TurnMode
 from pygpt_net.core.realtime.shared.session import set_ctx_rt_handle, set_rt_session_expires_at
+from pygpt_net.core.realtime.shared.computer import image_data_uri, normalize_image_paths
 
 
 class OpenAIRealtimeClient:
@@ -50,7 +52,7 @@ class OpenAIRealtimeClient:
     Key points:
     - A single background asyncio loop runs in its own thread for the lifetime of the client.
     - One websocket connection (session) at a time; multiple "turns" (send_turn) are serialized.
-    - No server VAD: manual turn control via input_audio_buffer.* + response.create.
+    - Manual turn control by default, with optional server/semantic VAD for auto-turn.
     - Safe to call run()/send_turn()/reset()/shutdown() from any thread or event loop.
 
     Session resumption:
@@ -77,6 +79,7 @@ class OpenAIRealtimeClient:
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._rx_task: Optional[asyncio.Task] = None
         self._running: bool = False
+        self._transport_error_reported: bool = False
 
         # Background loop
         self._bg = BackgroundLoop(name="OpenAI-RT-Loop")
@@ -133,7 +136,19 @@ class OpenAIRealtimeClient:
         :param should_stop: Sync callback to signal barge-in (cancel active response)
         """
         self._ensure_background_loop()
+
+        # A persistent realtime session keeps one receiver loop alive across
+        # multiple user turns. Refresh the per-turn binding on *every* run, not
+        # only when the socket/session is first opened. Otherwise the receiver
+        # keeps calling the callbacks captured by the first RealtimeWorker: live
+        # deltas are then rendered into that old CtxItem while response.done is
+        # persisted into the current one. The mismatch becomes visible as text
+        # streaming inside an earlier message until the WebView is reloaded.
         self._ctx = ctx
+        self._on_text = on_text
+        self._on_audio = on_audio
+        self._should_stop = should_stop or (lambda: False)
+        self._last_opts = opts
 
         # If a different resumable handle is provided, reset to attempt best-effort resume.
         try:
@@ -242,6 +257,15 @@ class OpenAIRealtimeClient:
         self._ensure_background_loop()
         self._bg.run_sync(self._reset_session_internal(ctx, opts, on_text, on_audio, should_stop), timeout=timeout)
 
+    def cancel_response_sync(self, timeout: float = 0.5):
+        """Cancel only the active response, preserving the live session."""
+        if not self._bg.loop or not self._bg.loop.is_running():
+            return
+        try:
+            self._bg.run_sync(self._cancel_active_response_internal(), timeout=timeout)
+        except Exception:
+            pass
+
     def shutdown_sync(self, timeout: float = 5.0):
         """Synchronous wrapper around shutdown() — closes the WS but leaves the loop alive."""
         if not self._bg.loop or not self._bg.loop.is_running():
@@ -313,7 +337,7 @@ class OpenAIRealtimeClient:
         if not api_key:
             raise RuntimeError("OpenAI API key not configured")
 
-        model_id = getattr(opts, "model", None) or (ctx.model if ctx and ctx.model else "gpt-4o-realtime-preview")
+        model_id = getattr(opts, "model", None) or (ctx.model if ctx and ctx.model else "gpt-realtime-2.1")
         voice = getattr(opts, "voice", None) or self._preferred_voice()
 
         # Optional: requested resume handle from opts
@@ -336,9 +360,9 @@ class OpenAIRealtimeClient:
         url_with_sid = f"{self.WS_URL}?{urlencode(base_q)}"
         url_no_sid = f"{self.WS_URL}?{urlencode({'model': model_id})}"
 
+        # GA Realtime endpoint no longer uses the legacy OpenAI-Beta header.
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
 
         # Transcription toggle
@@ -351,14 +375,20 @@ class OpenAIRealtimeClient:
         self._ctx = ctx
         self._last_opts = opts
 
-        # Control primitives
+        # Control primitives. A receiver that died unexpectedly can leave
+        # _response_active=True from the previous socket. A new connection has no
+        # such response, so clear all per-response state before starting it.
+        self._response_active = False
+        self._rt_state = None
         self._response_done = asyncio.Event()
         self._send_lock = asyncio.Lock()
 
         if self.debug:
             print(f"[open_session] owner_loop={id(asyncio.get_running_loop())}")
 
-        # Connect WS: first try with session_id if provided; on failure, fall back to plain URL.
+        # Connect WS: first try with session_id if provided; on failure, fall back
+        # to the plain URL. Preserve the real handshake error so the UI can show
+        # useful diagnostics (auth/quota/billing) instead of a generic failure.
         try:
             target_url = url_with_sid if resume_sid else url_no_sid
             self.ws = await websockets.connect(
@@ -369,10 +399,13 @@ class OpenAIRealtimeClient:
                 ping_timeout=20,
                 close_timeout=5,
             )
-        except Exception as e:
+        except Exception as first_error:
             if resume_sid and self.debug:
-                print(f"[open_session] connect with session_id failed ({e!r}); falling back to plain URL")
-            if resume_sid:
+                print(f"[open_session] connect with session_id failed ({first_error!r}); falling back to plain URL")
+            if not resume_sid:
+                self.ws = None
+                raise RuntimeError(f"OpenAI Realtime: WebSocket connect failed: {first_error}") from first_error
+            try:
                 self.ws = await websockets.connect(
                     url_no_sid,
                     additional_headers=headers,
@@ -381,24 +414,43 @@ class OpenAIRealtimeClient:
                     ping_timeout=20,
                     close_timeout=5,
                 )
+            except Exception as fallback_error:
+                self.ws = None
+                raise RuntimeError(
+                    f"OpenAI Realtime: WebSocket connect failed: {fallback_error}"
+                ) from fallback_error
+        self._transport_error_reported = False
         if self.debug:
             print("[open_session] WS connected")
 
-        # Session payload (manual by default; prepared for auto)
+        # Realtime GA session shape. Audio output already includes a transcript,
+        # therefore output_modalities must be ["audio"] rather than ["text", "audio"].
         session_payload = {
             "type": "session.update",
             "session": {
-                "modalities": ["text", "audio"],
-                "voice": voice,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                # turn_detection set below via apply_turn_mode_openai
+                "type": "realtime",
+                "output_modalities": ["audio"],
+                "audio": {
+                    "input": {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": self._DEFAULT_RATE,
+                        },
+                    },
+                    "output": {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": self._DEFAULT_RATE,
+                        },
+                        "voice": voice,
+                    },
+                },
                 **({"instructions": str(getattr(opts, "system_prompt"))} if getattr(opts, "system_prompt", None) else {}),
             },
         }
         turn_mode = TurnMode.AUTO if bool(getattr(opts, "auto_turn", False)) else TurnMode.MANUAL
-        apply_turn_mode_openai(session_payload, turn_mode)
-        self._tune_openai_vad(session_payload, opts)
+        self._apply_openai_turn_mode(session_payload, turn_mode)
+        self._configure_openai_vad(session_payload, opts)
 
         # Attach tools to session (remote + functions)
         try:
@@ -415,21 +467,31 @@ class OpenAIRealtimeClient:
                 print(f"[open_session] tools sanitize error: {_e}")
             self._cached_session_tools_sig = tools_signature([])
 
-        # Attach native input transcription if requested
+        # Attach native input transcription using the GA audio.input.transcription shape.
         try:
             if transcribe_enabled:
                 iat = {"model": "whisper-1"}
                 lang = getattr(opts, "transcribe_language", None) or getattr(opts, "language", None)
                 if lang:
                     iat["language"] = str(lang)
-                session_payload["session"]["input_audio_transcription"] = iat
+                session_payload["session"]["audio"]["input"]["transcription"] = iat
         except Exception:
             pass
 
         if self.debug:
             print(f"[open_session] session_payload: {json.dumps(session_payload)}")
 
-        await self.ws.send(json.dumps(session_payload))
+        try:
+            await self.ws.send(json.dumps(session_payload))
+        except Exception as e:
+            ws = self.ws
+            self.ws = None
+            try:
+                if ws is not None:
+                    await ws.close()
+            except Exception:
+                pass
+            raise RuntimeError(f"OpenAI Realtime: session setup failed: {e}") from e
         if self.debug:
             print("[open_session] session.update sent")
 
@@ -626,8 +688,8 @@ class OpenAIRealtimeClient:
                     self._response_done = asyncio.Event()
             wait_curr = self._response_done  # snapshot for race-free waiting
 
-            # Build optional response payload (modalities + tools/tool_choice)
-            resp_obj = {"modalities": ["text", "audio"]}
+            # Build optional GA response payload (output modalities + tools/tool_choice)
+            resp_obj = {"output_modalities": ["audio"]}
             try:
                 resp_tools, tool_choice = prepare_tools_for_response(self._last_opts)
                 if resp_tools:
@@ -749,7 +811,8 @@ class OpenAIRealtimeClient:
                         "type": "input_audio_buffer.append",
                         "audio": base64.b64encode(chunk).decode("utf-8"),
                     }))
-                except Exception:
+                except Exception as e:
+                    await self._handle_transport_failure(e, self._ctx)
                     return
 
             # If plugin reported stream end, flush the buffer once.
@@ -758,8 +821,8 @@ class OpenAIRealtimeClient:
                     if self.debug:
                         print("[_rt_handle_audio_input] final chunk; committing")
                     await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                except Exception:
-                    pass
+                except Exception as e:
+                    await self._handle_transport_failure(e, self._ctx)
 
     def commit_audio_input_sync(self, timeout: float = 0.5):
         """
@@ -789,8 +852,8 @@ class OpenAIRealtimeClient:
         async with self._send_lock:
             try:
                 await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-            except Exception:
-                pass
+            except Exception as e:
+                await self._handle_transport_failure(e, self._ctx)
 
     def force_response_now_sync(self, timeout: float = 5.0):
         """Synchronously force the model to create a response from current input buffer."""
@@ -818,7 +881,8 @@ class OpenAIRealtimeClient:
             # 1) Finalize current input buffer
             try:
                 await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-            except Exception:
+            except Exception as e:
+                await self._handle_transport_failure(e, self._ctx)
                 return
 
             # 2) Prepare wait handle for this response
@@ -830,8 +894,8 @@ class OpenAIRealtimeClient:
                 except Exception:
                     self._response_done = asyncio.Event()
 
-            # 3) Build response payload (modalities + tools/tool_choice like in _send_turn_internal)
-            resp_obj = {"modalities": ["text", "audio"]}
+            # 3) Build GA response payload (output modalities + tools/tool_choice)
+            resp_obj = {"output_modalities": ["audio"]}
             try:
                 resp_tools, tool_choice = prepare_tools_for_response(self._last_opts)
                 if resp_tools:
@@ -846,7 +910,8 @@ class OpenAIRealtimeClient:
             # 4) Trigger the assistant response now
             try:
                 await self.ws.send(json.dumps({"type": "response.create", "response": resp_obj}))
-            except Exception:
+            except Exception as e:
+                await self._handle_transport_failure(e, self._ctx)
                 return
 
     # -----------------------------
@@ -922,7 +987,10 @@ class OpenAIRealtimeClient:
             try:
                 payload = {
                     "type": "session.update",
-                    "session": {"tools": session_tools}
+                    "session": {
+                        "type": "realtime",
+                        "tools": session_tools,
+                    },
                 }
                 await self.ws.send(json.dumps(payload))
                 self._cached_session_tools_sig = new_sig
@@ -942,13 +1010,14 @@ class OpenAIRealtimeClient:
         results,
         continue_turn: bool = True,
         wait_for_done: bool = True,
+        image_paths=None,
     ):
         """
         Send tool results back to the Realtime session.
         """
         self._ensure_background_loop()
         return await self._run_on_owner(
-            self._send_tool_results_internal(results, continue_turn, wait_for_done)
+            self._send_tool_results_internal(results, continue_turn, wait_for_done, image_paths)
         )
 
     def send_tool_results_sync(
@@ -957,11 +1026,12 @@ class OpenAIRealtimeClient:
         continue_turn: bool = True,
         wait_for_done: bool = True,
         timeout: float = 20.0,
+        image_paths=None,
     ):
         """Synchronous wrapper for send_tool_results()."""
         self._ensure_background_loop()
         return self._bg.run_sync(
-            self._send_tool_results_internal(results, continue_turn, wait_for_done),
+            self._send_tool_results_internal(results, continue_turn, wait_for_done, image_paths),
             timeout=timeout
         )
 
@@ -970,6 +1040,7 @@ class OpenAIRealtimeClient:
         results,
         continue_turn: bool,
         wait_for_done: bool,
+        image_paths=None,
     ):
         """
         Owner-loop implementation. Serializes sends under the WS writer lock.
@@ -999,6 +1070,27 @@ class OpenAIRealtimeClient:
                 if it.get("previous_item_id"):
                     payload["previous_item_id"] = it["previous_item_id"]
                 await self.ws.send(json.dumps(payload))
+
+            # Realtime Computer Use is implemented as ordinary function calls.
+            # Feed the transport-only desktop screenshot back as a user image
+            # before asking the model to continue the tool turn.
+            for path in normalize_image_paths(image_paths):
+                try:
+                    await self.ws.send(json.dumps({
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{
+                                "type": "input_image",
+                                "image_url": image_data_uri(path),
+                                "detail": "high",
+                            }],
+                        },
+                    }))
+                except Exception as exc:
+                    if self.debug:
+                        print(f"[realtime computer] image send failed: {exc}")
 
             # Optionally ask the model to continue
             if continue_turn:
@@ -1033,6 +1125,7 @@ class OpenAIRealtimeClient:
 
         DEFAULT_RATE = self._DEFAULT_RATE
         audio_done = True
+        response_ctx = None
 
         try:
             while self._running and self.ws:
@@ -1047,6 +1140,8 @@ class OpenAIRealtimeClient:
                 except Exception as e:
                     if self.debug:
                         print(f"[_recv_loop] recv error: {e!r}")
+                    if self._running:
+                        self._emit_transport_error(e, response_ctx or self._ctx)
                     break
 
                 if isinstance(raw, bytes):
@@ -1059,6 +1154,7 @@ class OpenAIRealtimeClient:
                     continue
 
                 etype = ev.get("type")
+                event_ctx = response_ctx or self._ctx
 
                 # ---- session lifecycle (capture server handle) ----
                 if etype in ("session.created", "session.updated"):
@@ -1083,6 +1179,8 @@ class OpenAIRealtimeClient:
                     if self.debug:
                         print("[_recv_loop] response created")
                     self._response_active = True
+                    response_ctx = self._ctx
+                    event_ctx = response_ctx
                     audio_done = False
                     self._rt_reset_state()
 
@@ -1100,7 +1198,7 @@ class OpenAIRealtimeClient:
 
                     # disable mic input if auto-commit
                     if self._last_opts:
-                        self._last_opts.rt_signals.response.emit(RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_COMMIT, {
+                        safe_emit(self._last_opts.rt_signals, "response", RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_COMMIT, {
                             "ctx": self._ctx,
                         }))
 
@@ -1161,10 +1259,10 @@ class OpenAIRealtimeClient:
                         self._rt_append_text(delta)
                         if self._on_text:
                             try:
-                                await self._on_text(str(delta))
+                                await self._on_text(str(delta), event_ctx)
                             except Exception:
                                 pass
-                elif etype == "response.audio_transcript.delta":
+                elif etype in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
                     if self._transcribe_enabled():
                         delta = ev.get("delta") or ev.get("text")
                         if isinstance(delta, dict) and "text" in delta:
@@ -1173,32 +1271,37 @@ class OpenAIRealtimeClient:
                             self._rt_append_text(delta)
                             if self._on_text:
                                 try:
-                                    await self._on_text(str(delta))
+                                    await self._on_text(str(delta), event_ctx)
                                 except Exception:
                                     pass
 
-                elif etype in ("response.text.done", "response.output_text.done", "response.audio_transcript.done"):
+                elif etype in (
+                    "response.text.done",
+                    "response.output_text.done",
+                    "response.output_audio_transcript.done",
+                    "response.audio_transcript.done",
+                ):
                     if self.debug:
                         print("[_recv_loop] text done")
 
                 elif etype == "response.content_part.added":
                     part = ev.get("part") or {}
                     ptype = part.get("type")
-                    if ptype == "text":
+                    if ptype in ("text", "output_text"):
                         txt = part.get("text") or ""
                         if txt:
                             self._rt_append_text(txt)
                             if self._on_text:
                                 try:
-                                    await self._on_text(str(txt))
+                                    await self._on_text(str(txt), event_ctx)
                                 except Exception:
                                     pass
-                    elif ptype == "audio":
+                    elif ptype in ("audio", "output_audio"):
                         b64 = part.get("audio")
                         if b64 and self._on_audio:
                             try:
                                 data = base64.b64decode(b64)
-                                await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False)
+                                await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False, event_ctx)
                             except Exception:
                                 pass
                         tr = part.get("transcript")
@@ -1206,25 +1309,25 @@ class OpenAIRealtimeClient:
                             self._rt_append_text(tr)
                             if self._on_text:
                                 try:
-                                    await self._on_text(str(tr))
+                                    await self._on_text(str(tr), event_ctx)
                                 except Exception:
                                     pass
 
-                elif etype == "response.audio.delta":
+                elif etype in ("response.output_audio.delta", "response.audio.delta"):
                     b64 = ev.get("delta")
                     if b64 and self._on_audio:
                         try:
                             data = base64.b64decode(b64)
-                            await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False)
+                            await self._on_audio(data, "audio/pcm", DEFAULT_RATE, 1, False, event_ctx)
                         except Exception:
                             pass
 
-                elif etype == "response.audio.done":
+                elif etype in ("response.output_audio.done", "response.audio.done"):
                     if self.debug:
                         print("[_recv_loop] audio done")
                     if not audio_done and self._on_audio:
                         try:
-                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True)
+                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True, event_ctx)
                         except Exception:
                             pass
                         audio_done = True
@@ -1300,7 +1403,7 @@ class OpenAIRealtimeClient:
                             self._rt_append_text(hdr + code_delta)
                             if self._on_text:
                                 try:
-                                    await self._on_text(hdr + code_delta)
+                                    await self._on_text(hdr + code_delta, event_ctx)
                                 except Exception:
                                     pass
                             self._rt_state["is_code"] = True
@@ -1308,7 +1411,7 @@ class OpenAIRealtimeClient:
                             self._rt_append_text(code_delta)
                             if self._on_text:
                                 try:
-                                    await self._on_text(code_delta)
+                                    await self._on_text(code_delta, event_ctx)
                                 except Exception:
                                     pass
 
@@ -1320,7 +1423,7 @@ class OpenAIRealtimeClient:
                         self._rt_append_text(tail)
                         if self._on_text:
                             try:
-                                await self._on_text(tail)
+                                await self._on_text(tail, event_ctx)
                             except Exception:
                                 pass
                         self._rt_state["is_code"] = False
@@ -1346,15 +1449,16 @@ class OpenAIRealtimeClient:
                     if image_b64:
                         try:
                             img_bytes = base64.b64decode(image_b64)
-                            save_path = self.window.core.image.gen_unique_path(self._ctx)
+                            save_path = self.window.core.image.gen_unique_path(event_ctx)
                             with open(save_path, "wb") as f:
                                 f.write(img_bytes)
+                            self.window.core.filesystem.materialize_runtime_artifact(save_path, ctx=event_ctx)
                             self._rt_state["image_paths"].append(save_path)
                             self._rt_state["is_image"] = True
-                            if not isinstance(self._ctx.images, list):
-                                self._ctx.images = []
-                            if save_path not in self._ctx.images:
-                                self._ctx.images.append(save_path)
+                            if not isinstance(event_ctx.images, list):
+                                event_ctx.images = []
+                            if save_path not in event_ctx.images:
+                                event_ctx.images.append(save_path)
                         except Exception:
                             pass
 
@@ -1364,7 +1468,7 @@ class OpenAIRealtimeClient:
                     # Ensure audio finalized
                     if not audio_done and self._on_audio:
                         try:
-                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True)
+                            await self._on_audio(b"", "audio/pcm", DEFAULT_RATE, 1, True, event_ctx)
                         except Exception:
                             pass
                         audio_done = True
@@ -1392,21 +1496,21 @@ class OpenAIRealtimeClient:
 
                     # Persist into ctx
                     try:
-                        if self._ctx:
-                            self._ctx.output = output or (self._ctx.output or "")
+                        if event_ctx and not getattr(event_ctx, "_realtime_interrupted", False):
+                            event_ctx.output = output or (event_ctx.output or "")
                             up = self._rt_state.get("usage_payload") if self._rt_state else None
                             if up:
                                 in_tok = up.get("in")
                                 out_tok = up.get("out")
                                 if in_tok is None:
-                                    in_tok = self._ctx.input_tokens if self._ctx.input_tokens is not None else 0
+                                    in_tok = event_ctx.input_tokens if event_ctx.input_tokens is not None else 0
                                 if out_tok is None:
                                     out_tok = 0
-                                self._ctx.set_tokens(in_tok, out_tok)
+                                event_ctx.set_tokens(in_tok, out_tok)
                                 try:
-                                    if not isinstance(self._ctx.extra, dict):
-                                        self._ctx.extra = {}
-                                    self._ctx.extra["usage"] = {
+                                    if not isinstance(event_ctx.extra, dict):
+                                        event_ctx.extra = {}
+                                    event_ctx.extra["usage"] = {
                                         "vendor": "openai",
                                         "input_tokens": in_tok,
                                         "output_tokens": out_tok,
@@ -1418,51 +1522,51 @@ class OpenAIRealtimeClient:
 
                             # Citations
                             if self._rt_state and self._rt_state["citations"]:
-                                if self._ctx.urls is None:
-                                    self._ctx.urls = []
+                                if event_ctx.urls is None:
+                                    event_ctx.urls = []
                                 for u in self._rt_state["citations"]:
-                                    if u not in self._ctx.urls:
-                                        self._ctx.urls.append(u)
+                                    if u not in event_ctx.urls:
+                                        event_ctx.urls.append(u)
 
                             # Images
                             if self._rt_state and self._rt_state["image_paths"]:
-                                if not isinstance(self._ctx.images, list):
-                                    self._ctx.images = []
+                                if not isinstance(event_ctx.images, list):
+                                    event_ctx.images = []
                                 for p in self._rt_state["image_paths"]:
-                                    if p not in self._ctx.images:
-                                        self._ctx.images.append(p)
+                                    if p not in event_ctx.images:
+                                        event_ctx.images.append(p)
 
-                            self.window.core.ctx.update_item(self._ctx)
+                            self.window.core.ctx.update_item(event_ctx)
                     except Exception:
                         pass
 
                     # Download container files if any
                     try:
                         files = (self._rt_state or {}).get("files") or []
-                        if files:
-                            self.window.core.api.openai.container.download_files(self._ctx, files)
+                        if files and not getattr(event_ctx, "_realtime_interrupted", False):
+                            self.window.core.api.openai.container.download_files(event_ctx, files)
                     except Exception:
                         pass
 
                     # Unpack tool calls if any
                     try:
                         tcs = (self._rt_state or {}).get("tool_calls") or []
-                        if tcs:
+                        if tcs and not getattr(event_ctx, "_realtime_interrupted", False):
                             for tc in tcs:
                                 fn = tc.get("function") or {}
                                 if isinstance(fn.get("arguments"), dict):
                                     fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
-                            self._ctx.force_call = bool((self._rt_state or {}).get("force_func_call"))
+                            event_ctx.force_call = bool((self._rt_state or {}).get("force_func_call"))
                             self.window.core.debug.info("[realtime] Tool calls found, unpacking...")
-                            self.window.core.command.unpack_tool_calls_chunks(self._ctx, tcs)
-                            self.window.core.ctx.update_item(self._ctx)
+                            self.window.core.command.unpack_tool_calls_chunks(event_ctx, tcs)
+                            self.window.core.ctx.update_item(event_ctx)
                     except Exception:
                         pass
 
                     # Persist last tool calls snapshot for mapping tool outputs
                     try:
                         tcs = (self._rt_state or {}).get("tool_calls") or []
-                        if tcs:
+                        if tcs and not getattr(event_ctx, "_realtime_interrupted", False):
                             self._last_tool_calls = list(tcs)
                     except Exception:
                         pass
@@ -1473,12 +1577,13 @@ class OpenAIRealtimeClient:
 
                     # send RT_OUTPUT_TURN_END signal
                     if self._last_opts:
-                        self._last_opts.rt_signals.response.emit(RealtimeEvent(RealtimeEvent.RT_OUTPUT_TURN_END, {
-                            "ctx": self._ctx,
+                        safe_emit(self._last_opts.rt_signals, "response", RealtimeEvent(RealtimeEvent.RT_OUTPUT_TURN_END, {
+                            "ctx": event_ctx,
                         }))
 
                     # Reset per-response extraction state
                     self._rt_state = None
+                    response_ctx = None
 
                 elif etype == "error":
                     if self.debug:
@@ -1489,11 +1594,30 @@ class OpenAIRealtimeClient:
                     code = (err.get("code") or "")
                     if isinstance(code, str) and code.strip().lower() == "session_expired":
                         self._rt_session_id = None
-                        if self.debug:
-                            print("[_recv_loop] session expired")
-                    if "already has an active response" in (msg or "").lower():
+                        self._response_active = False
                         if self._response_done:
                             self._response_done.set()
+                        if self.debug:
+                            print("[_recv_loop] session expired; closing stale socket")
+                        # The server-side session is no longer usable even if the
+                        # websocket object has not closed yet. Tear it down now so
+                        # is_session_active() becomes false and the next turn
+                        # reconnects instead of silently writing into a dead session.
+                        if self._last_opts:
+                            safe_emit(
+                                self._last_opts.rt_signals,
+                                "response",
+                                RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_ERROR, {
+                                    "error": RuntimeError("Realtime session expired")
+                                }),
+                            )
+                        break
+                    if "already has an active response" in (msg or "").lower():
+                        # A duplicate response.create does not mean the active
+                        # response has completed. Keep the turn open and wait for
+                        # the real response.done; marking _response_done here lets
+                        # subsequent microphone turns overlap the still-live one.
+                        self._response_active = True
                         continue
                     if self._response_done:
                         self._response_done.set()
@@ -1505,6 +1629,8 @@ class OpenAIRealtimeClient:
         except Exception as e:
             if self.debug:
                 print(f"[_recv_loop] exception: {e!r}")
+            if self._running:
+                self._emit_transport_error(e, response_ctx or self._ctx)
         finally:
             if self.debug:
                 print("[_recv_loop] stopped")
@@ -1521,10 +1647,48 @@ class OpenAIRealtimeClient:
                 pass
             self.ws = None
             self._running = False
+            self._response_active = False
+            self._rt_state = None
 
     # -----------------------------
     # Helpers
     # -----------------------------
+
+    def _emit_transport_error(self, error, ctx=None) -> None:
+        """Emit one main-thread error for one failed websocket generation."""
+        if self._transport_error_reported:
+            return
+        self._transport_error_reported = True
+        if not self._last_opts:
+            return
+        safe_emit(
+            self._last_opts.rt_signals,
+            "response",
+            RealtimeEvent(RealtimeEvent.RT_OUTPUT_AUDIO_ERROR, {
+                "ctx": ctx or self._ctx,
+                "error": error,
+                "provider": "openai",
+                "phase": "transport",
+            }),
+        )
+
+    async def _handle_transport_failure(self, error, ctx=None) -> None:
+        """Invalidate a broken websocket immediately and wake all turn waiters."""
+        self._emit_transport_error(error, ctx)
+        self._running = False
+        self._response_active = False
+        try:
+            if self._response_done and not self._response_done.is_set():
+                self._response_done.set()
+        except Exception:
+            pass
+        ws = self.ws
+        self.ws = None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     def _preferred_voice(self) -> str:
         """
@@ -1556,7 +1720,7 @@ class OpenAIRealtimeClient:
                 if not isinstance(c, dict):
                     continue
                 ctype = c.get("type")
-                if ctype == "audio" and self._transcribe_enabled():
+                if ctype in ("audio", "output_audio") and self._transcribe_enabled():
                     tr = c.get("transcript")
                     if tr:
                         parts.append(str(tr))
@@ -1655,33 +1819,66 @@ class OpenAIRealtimeClient:
             if self._ctx:
                 if not isinstance(self._ctx.extra, dict):
                     self._ctx.extra = {}
-                self._ctx.input.extra["input_transcript"] = str(transcript)
-                if not getattr(self._last_opts, "prompt", None):
+                self._ctx.extra["input_transcript"] = str(transcript)
+                # A reused VAD session can retain options from an earlier text
+                # turn. Decide against the current input, not that stale prompt.
+                if str(self._ctx.input or "").strip() in ("", "..."):
                     self._ctx.input = str(transcript)
                 self.window.core.ctx.update_item(self._ctx)
         except Exception:
             pass
 
-    def _tune_openai_vad(self, session_payload: dict, opts) -> None:
-        """
-        Increase end-of-speech hold for server VAD (auto-turn) to reduce premature turn endings.
-        """
-        try:
-            sess = session_payload.get("session") or {}
-            td = sess.get("turn_detection")
-            if not isinstance(td, dict):
-                return  # manual mode or VAD disabled
+    @staticmethod
+    def _openai_audio_input(session_payload: dict) -> dict:
+        """Return/create the Realtime GA session.audio.input object."""
+        sess = session_payload.setdefault("session", {})
+        sess.setdefault("type", "realtime")
+        audio = sess.setdefault("audio", {})
+        return audio.setdefault("input", {})
 
-            # Resolve target silence (default +2000 ms)
+    def _apply_openai_turn_mode(self, session_payload: dict, mode: TurnMode) -> None:
+        """Apply manual/server-VAD turn detection using the Realtime GA shape."""
+        audio_input = self._openai_audio_input(session_payload)
+        if mode == TurnMode.AUTO:
+            audio_input["turn_detection"] = {"type": "server_vad"}
+        else:
+            audio_input["turn_detection"] = None
+
+    def _configure_openai_vad(self, session_payload: dict, opts) -> None:
+        """Apply OpenAI VAD settings to session.audio.input.turn_detection."""
+        try:
+            audio_input = self._openai_audio_input(session_payload)
+            td = audio_input.get("turn_detection")
+            if not isinstance(td, dict):
+                return
+
+            # Optional VAD type override. GA semantic_vad has a different parameter set
+            # from server_vad, so server-only options are applied conditionally below.
+            vad_type = getattr(opts, "vad_type", None)
+            if isinstance(vad_type, str) and vad_type in ("server_vad", "semantic_vad"):
+                td["type"] = vad_type
+
+            create_response = getattr(opts, "vad_create_response", None)
+            if isinstance(create_response, bool):
+                td["create_response"] = create_response
+
+            interrupt_response = getattr(opts, "vad_interrupt_response", None)
+            if isinstance(interrupt_response, bool):
+                td["interrupt_response"] = interrupt_response
+
+            if td.get("type") != "server_vad":
+                return
+
+            threshold = getattr(opts, "vad_threshold", None)
+            if isinstance(threshold, (int, float)):
+                td["threshold"] = float(threshold)
+
             target_ms = getattr(opts, "vad_end_silence_ms", None)
             if not isinstance(target_ms, (int, float)) or target_ms <= 0:
-                # If user didn't override, ensure at least 2000 ms
                 base = int(td.get("silence_duration_ms") or 500)
                 target_ms = max(base, 2000)
-
             td["silence_duration_ms"] = int(target_ms)
 
-            # Optional: prefix padding before detected speech
             prefix_ms = getattr(opts, "vad_prefix_padding_ms", None)
             if isinstance(prefix_ms, (int, float)) and prefix_ms >= 0:
                 td["prefix_padding_ms"] = int(prefix_ms)
@@ -1739,55 +1936,25 @@ class OpenAIRealtimeClient:
 
         async with self._send_lock:
             try:
-                # Build base session.update; let helper set correct turn_detection shape
-                payload: dict = {"type": "session.update", "session": {}}
+                # Build a Realtime GA session.update with turn detection nested under audio.input.
+                payload: dict = {
+                    "type": "session.update",
+                    "session": {"type": "realtime"},
+                }
                 turn_mode = TurnMode.AUTO if enabled else TurnMode.MANUAL
-                apply_turn_mode_openai(payload, turn_mode)  # sets session.turn_detection (AUTO) or None (MANUAL)
+                self._apply_openai_turn_mode(payload, turn_mode)
 
                 if enabled:
-                    sess = payload.get("session", {})
-                    td = sess.get("turn_detection")
+                    self._configure_openai_vad(payload, self._last_opts)
+                    td = self._openai_audio_input(payload).get("turn_detection")
 
-                    # Optional VAD type override via opts.vad_type ("server_vad" | "semantic_vad")
-                    try:
-                        vad_type = getattr(self._last_opts, "vad_type", None)
-                        if isinstance(vad_type, str) and vad_type in ("server_vad", "semantic_vad"):
-                            if isinstance(td, dict):
-                                td["type"] = vad_type
-                    except Exception:
-                        pass
-
-                    # Optional threshold for server_vad
-                    try:
-                        thr = getattr(self._last_opts, "vad_threshold", None)
-                        if isinstance(thr, (int, float)) and isinstance(td, dict) and td.get("type") == "server_vad":
-                            td["threshold"] = float(thr)
-                    except Exception:
-                        pass
-
-                    # Apply defaults based on opts first
-                    self._tune_openai_vad(payload, self._last_opts)
-
-                    # Then hard-override with explicit args (user provided values win)
-                    if isinstance(td, dict):
+                    # Explicit runtime overrides win over values stored in opts.
+                    # silence/prefix are valid for server_vad only.
+                    if isinstance(td, dict) and td.get("type") == "server_vad":
                         if silence_ms is not None:
                             td["silence_duration_ms"] = int(silence_ms)
                         if prefix_ms is not None:
                             td["prefix_padding_ms"] = int(prefix_ms)
-
-                        # Optional flags from opts
-                        try:
-                            cr = getattr(self._last_opts, "vad_create_response", None)
-                            if isinstance(cr, bool):
-                                td["create_response"] = cr
-                        except Exception:
-                            pass
-                        try:
-                            ir = getattr(self._last_opts, "vad_interrupt_response", None)
-                            if isinstance(ir, bool):
-                                td["interrupt_response"] = ir
-                        except Exception:
-                            pass
 
                 # Send the update
                 await self.ws.send(json.dumps(payload))
@@ -1804,7 +1971,11 @@ class OpenAIRealtimeClient:
                     pass
 
                 if self.debug:
-                    td_dbg = (payload.get("session", {}) or {}).get("turn_detection")
+                    td_dbg = (
+                        ((payload.get("session", {}) or {}).get("audio", {}) or {})
+                        .get("input", {})
+                        .get("turn_detection")
+                    )
                     print(f"[update_session_autoturn] session.update sent; auto_turn={enabled}, td={td_dbg}")
 
             except Exception as e:

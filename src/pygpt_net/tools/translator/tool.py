@@ -16,9 +16,10 @@ from PySide6.QtCore import QTimer, Slot, QObject, Signal
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QFileDialog, QWidget, QApplication
 
+from pygpt_net.core.qt import safe_emit
 from pygpt_net.core.tabs.tab import Tab
 from pygpt_net.core.text.utils import output_clean_html, output_html2text
-from pygpt_net.tools.base import BaseTool, TabWidget
+from pygpt_net.tools.base import BaseTool, TabWidget, ToolMenuAction
 from pygpt_net.core.bridge import BridgeContext
 from pygpt_net.core.events import KernelEvent
 from pygpt_net.core.worker import Worker
@@ -43,8 +44,12 @@ class Translator(BaseTool):
         """
         super(Translator, self).__init__(*args, **kwargs)
         self.id = "translator"
+        self.allow_tab = False
+        self.allow_dialog = True
+        self.multi_tab = True
+        self.multi_dialog = False
+        self.on_menu_click = ToolMenuAction.ALWAYS_DIALOG
         self.dialog_id = "translator"
-        self.has_tab = False
         self.tab_title = "menu.tools.translator"
         self.tab_icon = ":/icons/translate.svg"
         self.opened = False
@@ -81,7 +86,7 @@ class Translator(BaseTool):
         :param id: ID to append to
         :param content: Content to append
         """
-        self.signals.append.emit(id, content)
+        safe_emit(self.signals, "append", id, content)
 
     def replace_content(self, id: str, content: str):
         """
@@ -90,7 +95,7 @@ class Translator(BaseTool):
         :param id: ID to replace in
         :param content: Content to replace with
         """
-        self.signals.replace.emit(id, content)
+        safe_emit(self.signals, "replace", id, content)
 
     @Slot(str, str, str, str, str)
     def translate(
@@ -147,7 +152,7 @@ class Translator(BaseTool):
         """
         event = KernelEvent(KernelEvent.STATUS, {'status': status})
         self.window.dispatch(event)
-        self.signals.set_status.emit(status)
+        safe_emit(self.signals, "set_status", status)
         QApplication.processEvents()
 
     def translate_execute(
@@ -268,8 +273,8 @@ class Translator(BaseTool):
         with open(path, "w", encoding="utf-8") as f:
             f.write(output)
         if os.path.exists(path):
-            self.signals.reload.emit(path)
-        self.signals.update.emit(output)
+            safe_emit(self.signals, "reload", path)
+        safe_emit(self.signals, "update", output)
 
     def reload_output(self):
         """Reload output data"""
@@ -299,7 +304,7 @@ class Translator(BaseTool):
         if data:
             decoded = json.loads(data)
             if isinstance(decoded, dict):
-                self.signals.load_config.emit(decoded)
+                safe_emit(self.signals, "load_config", decoded)
 
     @Slot(dict)
     def save_config(self, config: Dict):
@@ -368,13 +373,15 @@ class Translator(BaseTool):
 
     def open(self):
         """Open HTML canvas dialog"""
+        if not self.can_open_dialog():
+            return None
         if not self.opened:
             self.opened = True
             self.auto_opened = False
             self.load_config()
             self.window.ui.dialogs.open(self.dialog_id, width=800, height=600)
             self.update()
-            self.signals.on_load.emit()
+            safe_emit(self.signals, "on_load")
 
     def close(self):
         """Close HTML canvas dialog"""
@@ -454,7 +461,7 @@ class Translator(BaseTool):
             checkable=False,
         )
         actions[id].triggered.connect(
-            lambda: self.toggle()
+            self.on_menu_action
         )
         return actions
 
@@ -466,6 +473,8 @@ class Translator(BaseTool):
         :return: Tab widget instance
         """
 
+        if not self.can_open_tab():
+            return None
         tool = Tool(window=self.window, tool=self)  # dialog
         tool_widget = tool.as_tab()  # ToolWidget
         widget = TabWidget()

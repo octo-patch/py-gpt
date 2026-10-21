@@ -11,11 +11,14 @@
 
 import json
 import re
+from pygpt_net.item.render_attachment import attachment_paths
 
 from datetime import datetime, timedelta
 from typing import List, Tuple, Any, Dict
 
 from pygpt_net.item.ctx import CtxMeta, CtxItem, CtxGroup
+from pygpt_net.item.ctx_part import CtxItemPart
+from pygpt_net.item.ctx_part_task import CtxItemPartTask
 from pygpt_net.utils import unpack_var
 
 
@@ -106,7 +109,7 @@ def pack_item_value(value: Any) -> str:
     :return: JSON string or value itself
     """
     if isinstance(value, (list, dict)):
-        return json.dumps(value)
+        return json.dumps(value, ensure_ascii=False)
     return value
 
 
@@ -144,10 +147,12 @@ def unpack_item(
     item.doc_ids = unpack_item_value(row['docs_json'])
     item.external_id = row['external_id']
     item.extra = unpack_item_value(row['extra'])
-    item.files = unpack_item_value(row['files_json'])
+    item.files = attachment_paths(unpack_item_value(row['files_json']))
     item.id = unpack_var(row['id'], 'int')
-    item.images = unpack_item_value(row['images_json'])
+    item.images = attachment_paths(unpack_item_value(row['images_json']))
     item.input = row['input']
+    item.hidden_input = row.get('hidden_input')
+    item.hidden_output = row.get('hidden_output')
     item.input_name = row['input_name']
     item.input_timestamp = unpack_var(row['input_ts'], 'int')
     item.input_tokens = unpack_var(row['input_tokens'], 'int')
@@ -187,6 +192,43 @@ def unpack_item(
         item.extra = {}
     return item
 
+
+
+def unpack_part(part: CtxItemPart, row: Dict[str, Any], prefix: str = "") -> CtxItemPart:
+    """Unpack a ctx_item_partial row. Prefix is used by JOIN queries."""
+    get = lambda key, default=None: row.get(prefix + key, default)
+    part.id = unpack_var(get('id'), 'int')
+    part.uuid = get('uuid') or part.uuid
+    part.parent_item_id = unpack_var(get('parent_item_id'), 'int')
+    part.agent_id = get('agent_id')
+    part.name = get('name')
+    part.output = get('output')
+    part.extra = unpack_item_value(get('extra_json')) or {}
+    part.created_at = unpack_var(get('created_at'), 'int') or 0
+    part.updated_at = unpack_var(get('updated_at'), 'int') or 0
+    part.tasks = []
+    return part
+
+
+def unpack_part_task(task: CtxItemPartTask, row: Dict[str, Any], prefix: str = "") -> CtxItemPartTask:
+    """Unpack a ctx_item_partial_task row. Prefix is used by JOIN queries."""
+    get = lambda key, default=None: row.get(prefix + key, default)
+    task.id = unpack_var(get('id'), 'int')
+    task.uuid = get('uuid') or task.uuid
+    task.parent_item_part_id = unpack_var(get('parent_item_part_id'), 'int')
+    task.agent_id = get('agent_id')
+    task.name = get('name')
+    task.task_name = get('task_name')
+    task.task_summary = get('task_summary')
+    task.input = get('input')
+    task.output = get('output')
+    task.tool_call_id = get('tool_call_id')
+    task.tool_input = unpack_item_value(get('tool_input_json'))
+    task.tool_output = unpack_item_value(get('tool_output_json'))
+    task.extra = unpack_item_value(get('extra_json')) or {}
+    task.created_at = unpack_var(get('created_at'), 'int') or 0
+    task.updated_at = unpack_var(get('updated_at'), 'int') or 0
+    return task
 
 def unpack_meta(
         meta: CtxMeta,
@@ -235,6 +277,7 @@ def unpack_meta(
         group.uuid = row['group_uuid']
         group.name = row['group_name']
         group.additional_ctx = unpack_item_value(row['group_additional_ctx_json'])
+        group.extra = unpack_item_value(row.get('group_extra_json')) or {}
         if group.additional_ctx is None:
             group.additional_ctx = []
         meta.group = group
@@ -255,6 +298,9 @@ def unpack_group(
     """
     group.additional_ctx = unpack_item_value(row['additional_ctx_json'])
     group.created = unpack_var(row['created_ts'], 'int')
+    group.extra = unpack_item_value(row.get('extra_json'))
+    if group.extra is None:
+        group.extra = {}
     group.id = unpack_var(row['id'], 'int')
     group.name = row['name']
     group.updated = unpack_var(row['updated_ts'], 'int')

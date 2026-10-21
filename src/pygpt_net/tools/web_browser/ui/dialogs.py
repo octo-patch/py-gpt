@@ -6,118 +6,78 @@
 # GitHub:  https://github.com/szczyglis-dev/py-gpt   #
 # MIT License                                        #
 # Created By  : Marcin Szczygliński                  #
-# Updated Date: 2025.09.22 19:00:00                  #
+# Updated Date: 2026.10.04 00:00:00                  #
 # ================================================== #
 
-import re
-
+from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QIcon
-from PySide6.QtWidgets import QMenuBar, QVBoxLayout
+from PySide6.QtGui import QIcon
+from pygpt_net.ui.widget.dialog.base import BaseDialog
 
 from pygpt_net.core.tabs.tab import Tab
-from pygpt_net.ui.widget.dialog.base import BaseDialog
-from pygpt_net.utils import trans
 
 from .widgets import ToolWidget
 
-class Tool:
-    def __init__(self, window=None, tool=None):
-        """
-        HTML/JS canvas dialog
 
-        :param window: Window instance
-        :param tool: Tool instance
-        """
+class Tool:
+    """Frontend wrapper for one independent Canvas runtime."""
+
+    def __init__(self, window=None, tool=None, surface_kind="tab"):
         self.window = window
-        self.tool = tool  # tool instance
-        self.widget = ToolWidget(window, tool)
+        self.tool = tool
+        self.surface_kind = surface_kind
+        self.widget = ToolWidget(window, tool, surface_kind=surface_kind)
         self.layout = None
-        self.menu_bar = None
-        self.menu = {}
-        self.actions = {}  # menu actions
 
     def as_tab(self) -> ToolWidget:
-        """
-        Return tool as tab
-
-        :return: ToolWidget
-        """
         return self.widget
 
     def set_tab(self, tab: Tab):
-        """
-        Set tab
-
-        :param tab: Tab
-        """
         self.widget.set_tab(tab)
 
     def setup(self):
-        """Setup canvas dialog"""
+        """Build the navigation controls and browser viewport."""
         self.layout = self.widget.setup()
-
-        id = self.tool.get_dialog_id()
-        dialog = ToolDialog(window=self.window, tool=self.tool)
-        dialog.setLayout(self.layout)
-        dialog.setWindowTitle(trans("menu.tools.web_browser"))
-        dialog.resize(800, 500)
-        self.window.ui.dialog[id] = dialog
+        return self.layout
 
     def get_widget(self) -> ToolWidget:
-        """
-        Get widget
-
-        :return: ToolWidget
-        """
         return self.widget
 
     def get_tab(self) -> QVBoxLayout:
-        """
-        Get layout
-
-        :return: QVBoxLayout
-        """
         return self.layout
 
 
-class ToolDialog(BaseDialog):
-    def __init__(self, window=None, id="html_canvas", tool=None):
-        """
-        HTML canvas dialog
+class CanvasDialog(BaseDialog):
+    """Independent Canvas window registered alongside tab runtimes."""
 
-        :param window: main window
-        :param id: logger id
-        """
-        super(ToolDialog, self).__init__(window, id)
-        self.window = window
-        self.tool = tool
+    def __init__(self, window, dialog_id, runtime, manager):
+        super().__init__(window, dialog_id)
+        self.shared_id = manager.dialog_id
+        self.runtime = runtime
+        self.manager = manager
+        self._released = False
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        manager.add_lang_mapping(self, "menu.tools.canvas_html", setter="setWindowTitle")
+        self.setWindowIcon(QIcon(manager.tab_icon))
+        self.resize(1000, 700)
+        self.frontend = Tool(window, runtime, surface_kind="dialog")
+        self.setLayout(self.frontend.setup())
+        runtime.viewport.attach_surface(self.frontend.widget)
 
     def closeEvent(self, event):
-        """
-        Close event
+        super().closeEvent(event)
+        if event.isAccepted():
+            self._release()
 
-        :param event: close event
-        """
-        self.cleanup()
-        super(ToolDialog, self).closeEvent(event)
+    def done(self, result):
+        # Escape/reject also closes a QDialog without invoking closeEvent.
+        self._release()
+        super().done(result)
 
-    def keyPressEvent(self, event):
-        """
-        Key press event
-
-        :param event: key press event
-        """
-        if event.key() == Qt.Key_Escape:
-            self.cleanup()
-            self.close()  # close dialog when the Esc key is pressed.
-        else:
-            super(ToolDialog, self).keyPressEvent(event)
-
-    def cleanup(self):
-        """Cleanup on close"""
-        if self.window is None or self.tool is None:
+    def _release(self):
+        if self._released:
             return
-        self.tool.opened = False
-        self.tool.close()
-        self.tool.update()
+        self._released = True
+        self.frontend.widget._disconnect_viewport_hooks()
+        self.window.ui.dialog.pop(self.id, None)
+        self.manager.release_runtime(self.runtime)
