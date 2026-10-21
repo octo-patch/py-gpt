@@ -147,11 +147,11 @@ class TestMiniMax(unittest.TestCase):
             with self.subTest(model=model_id):
                 model = self.model(model_id)
                 model.custom_api_endpoint = "https://custom.example/v1"
-                model.custom_api_key = "custom-fixture-key"
+                model.custom_api_key = "custom-fixture"
                 request, body = self.send(model)
                 self.assertEqual(body["model"], model_id)
                 self.assertEqual(str(request.url), "https://custom.example/v1/chat/completions")
-                self.assertEqual(request.headers["authorization"], "Bearer custom-fixture-key")
+                self.assertEqual(request.headers["authorization"], "Bearer custom-fixture")
                 self.assertNotIn("reasoning_effort", body)
 
     def test_multimodal_and_tools(self):
